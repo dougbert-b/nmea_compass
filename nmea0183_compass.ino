@@ -79,8 +79,8 @@ private:
     long id;
     adafruit_bno055_offsets_t calibration_data;
     bool axis_valid;
-    unsigned char axis_remap;
-    unsigned char axis_sign;
+    Adafruit_BNO055::adafruit_bno055_axis_remap_config_t axis_config;
+    Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t axis_sign;
   };
 
 public:
@@ -89,7 +89,7 @@ public:
   PersistentDataFuncs(id);
   PersistentDataFuncs(calibration_data)
   PersistentDataFuncs(axis_valid)
-  PersistentDataFuncs(axis_remap)
+  PersistentDataFuncs(axis_config)
   PersistentDataFuncs(axis_sign)
 };
 
@@ -233,27 +233,51 @@ void setup() {
   // This will use the default I2C Wire pins.
   if (!bno.begin())
   {
-    Serial.print("No BNO055 detected");
+    Serial.println("No BNO055 detected");
     //while (1);
   }
-
-
-
-  int eeAddress = 0;
-  long storedID;
 
   // Note: The ESP32 EEPROM library is used differently than the official Arduino version.
   persistentData.begin();
 
-  persistentData.get_id(storedID);
+  bool valid;
+  persistentData.get_axis_valid(valid);
+  if (!valid) {
+    // First-time initialization
+    persistentData.put_axis_valid(true);
 
-  sensor_t sensor;
+    //persistentData.put_axis_config(Adafruit_BNO055::REMAP_CONFIG_P1);
+    //persistentData.put_axis_sign(Adafruit_BNO055::REMAP_SIGN_P1);
+
+      // X = -Y, Y = Z, Z = -X  For mounting on forward side of vertical bulkhead, cable on right.
+    persistentData.put_axis_config((Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09);
+    persistentData.put_axis_sign((Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05);
+
+    persistentData.commit();
+    Serial.println("Initialized axis remap");
+  } else {
+    Adafruit_BNO055::adafruit_bno055_axis_remap_config_t remap;
+    persistentData.get_axis_config(remap);
+    bno.setAxisRemap(remap);
+    Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t sign;
+    persistentData.get_axis_sign(sign);
+    bno.setAxisSign(sign);
+    Serial.printf("Set axis data to 0x%x  0x%x\n", remap, sign);
+  }
+
+
 
   /*
   *  Look for the sensor's unique ID in the EEPROM.
   *  This isn't foolproof, but it's better than nothing.
   */
+
+  long storedID;
+  persistentData.get_id(storedID);
+
+  sensor_t sensor;
   bno.getSensor(&sensor);
+
   if (storedID != sensor.sensor_id)
   {
       Serial.println("\nNo Calibration Data for this sensor exists in EEPROM");
