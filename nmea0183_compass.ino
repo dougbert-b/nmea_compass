@@ -66,34 +66,27 @@ unsigned long lastConnectionTime = 0;
 
 
 
-#define PersistentDataFuncs(name) \
-  public: void get_##name(decltype(Data::name)& val) { get(name##_addr, val); } \
-  public: void put_##name(const decltype(Data::name)& val) { put(name##_addr, val); } \
-  private: static constexpr int name##_addr = offsetof(Data, name); 
-
-
-class PersistentData_t : public EEPROMClass {
-private:
-  // This struct is never actually instantiated - it is used only for offset calculations
-  struct Data {
-    long id;
-    adafruit_bno055_offsets_t calibration_data;
-    bool axis_valid;
-    Adafruit_BNO055::adafruit_bno055_axis_remap_config_t axis_config;
-    Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t axis_sign;
-  };
-
+class PData {
 public:
-  void begin() { EEPROMClass::begin(sizeof(Data)); }
- 
-  PersistentDataFuncs(id);
-  PersistentDataFuncs(calibration_data)
-  PersistentDataFuncs(axis_valid)
-  PersistentDataFuncs(axis_config)
-  PersistentDataFuncs(axis_sign)
+  long id;
+  adafruit_bno055_offsets_t calibration_data;
+  bool axis_valid;
+  Adafruit_BNO055::adafruit_bno055_axis_remap_config_t axis_config;
+  Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t axis_sign;
+
+  void begin() {
+    EEPROM.begin(sizeof(this)); 
+    EEPROM.get(0, *this);
+  }
+
+  void commit() {
+    EEPROM.put(0, *this);
+    EEPROM.commit();
+  }
 };
 
-PersistentData_t persistentData;
+PData pData;
+
 
 
 void onWiFiEvent(arduino_event_id_t event) {
@@ -154,15 +147,15 @@ void handleRoot(AsyncWebServerRequest *request){
                    orientationData.orientation.x, -orientationData.orientation.y, -orientationData.orientation.z);
   response->printf("<br>Calibration:<br>system: %d  gyro: %d  accel: %d  mag: %d<br>", system_calib, gyro_calib, accel_calib, mag_calib);
   response->printf("<br>fully_calib: %d<br>found_calib: %d", fully_calib, found_calib);
+  response->printf("<br>axis_config: 0x%02x<br>axis_sign: 0x%02x", pData.axis_config, pData.axis_sign);
   response->print("<br><br><a href=\"update\">Update Firmware</a>");
   response->print("<br><br><a href=\"uncalibrate\">Reset Compass Calibration</a>");
-
+  response->print("<br><br><a href=\"axis_remap\">Remap Axes</a>");
 
   response->print(msgTrailer);
 
   request->send(response);
   lastConnectionTime = millis();
-
 }
 
 void handleRootText(AsyncWebServerRequest *request){
@@ -175,10 +168,10 @@ void handleRootText(AsyncWebServerRequest *request){
                    orientationData.orientation.x, -orientationData.orientation.y, -orientationData.orientation.z);
   response->printf("Calibration: system: %d  gyro: %d  accel: %d  mag: %d\n", system_calib, gyro_calib, accel_calib, mag_calib);
   response->printf("fully_calib: %d  found_calib: %d\n", fully_calib, found_calib);
+  response->printf("axis_config: 0x%02x  axis_sign: 0x%02x\n", pData.axis_config, pData.axis_sign);
 
   request->send(response);
   lastConnectionTime = millis();
-
 }
 
 
@@ -202,6 +195,33 @@ void handleUncalibrate(AsyncWebServerRequest *request) {
   clearCalib();
   String message = "Calibration erased - please power-cycle\n\n";
   request->send(200, "text/plain", message);
+}
+
+
+void handleAxisRemap(AsyncWebServerRequest *request){
+
+  AsyncResponseStream *response = request->beginResponseStream("text/html");
+  response->addHeader("Server","ESP Async Web Server");
+  response->print(msgHeader);
+  response->printf("<form action=\"/axis_remap\" method=\"post\">");
+  response->printf("<label for=\"axis_remap\">Axis remap:</label><br>");
+  response->printf("<input type=\"text\" id=\"axis_remap\" name=\"axis_remap\" value=\"%02x\"><br>", pData.axis_config);
+  response->printf("<label for=\"axis_sign\">Axis sign:</label><br>");
+  response->printf("<input type=\"text\" id=\"axis_sign\" name=\"axis_sign\" value=\"%02x\"><br>", pData.axis_sign);
+  response->printf("<input type=\"submit\" value=\"Submit\">");
+  response->printf("</form>");
+
+  request->send(response);
+}
+
+void handleAxisRemapPost(AsyncWebServerRequest *request){
+  int params = request->params();
+  for (int i=0;i<params;i++){
+    AsyncWebParameter* p = request->getParam(i);
+    if (p->isPost()){
+      Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
+    }
+  }
 }
 
 void print_wakeup_reason(){
@@ -238,50 +258,40 @@ void setup() {
   }
 
   // Note: The ESP32 EEPROM library is used differently than the official Arduino version.
-  persistentData.begin();
+  pData.begin();
 
-  bool valid;
-  persistentData.get_axis_valid(valid);
-  if (!valid) {
+  if (!pData.axis_valid) {
     // First-time initialization
-    persistentData.put_axis_valid(true);
+    pData.axis_valid = true;
 
-    //persistentData.put_axis_config(Adafruit_BNO055::REMAP_CONFIG_P1);
-    //persistentData.put_axis_sign(Adafruit_BNO055::REMAP_SIGN_P1);
+    //pData.axis_config = Adafruit_BNO055::REMAP_CONFIG_P1;
+    //pData.axis_sign = Adafruit_BNO055::REMAP_SIGN_P1;
 
       // X = -Y, Y = Z, Z = -X  For mounting on forward side of vertical bulkhead, cable on right.
-    persistentData.put_axis_config((Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09);
-    persistentData.put_axis_sign((Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05);
-
-    persistentData.commit();
+    pData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09;
+    pData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05;
+    pData.commit();
     Serial.println("Initialized axis remap");
   } else {
-    Adafruit_BNO055::adafruit_bno055_axis_remap_config_t remap;
-    persistentData.get_axis_config(remap);
-    bno.setAxisRemap(remap);
-    Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t sign;
-    persistentData.get_axis_sign(sign);
-    bno.setAxisSign(sign);
-    Serial.printf("Set axis data to 0x%x  0x%x\n", remap, sign);
+    bno.setAxisRemap(pData.axis_config);
+    bno.setAxisSign(pData.axis_sign);
+    Serial.printf("Set axis data to 0x%x  0x%x\n", pData.axis_config, pData.axis_sign);
   }
 
 
 
   /*
-  *  Look for the sensor's unique ID in the EEPROM.
+  *  Read the sensor's unique ID in the EEPROM.
   *  This isn't foolproof, but it's better than nothing.
   */
-
-  long storedID;
-  persistentData.get_id(storedID);
 
   sensor_t sensor;
   bno.getSensor(&sensor);
 
-  if (storedID != sensor.sensor_id)
+  if (pData.id != sensor.sensor_id)
   {
       Serial.println("\nNo Calibration Data for this sensor exists in EEPROM");
-      Serial.printf("\nSensor ID: %lx  Stored ID: %lx\n", sensor.sensor_id, storedID);
+      Serial.printf("\nSensor ID: %lx  Stored ID: %lx\n", sensor.sensor_id, pData.id);
 
       delay(500);
   }
@@ -289,12 +299,9 @@ void setup() {
   {
       Serial.println("\nFound Calibration for this sensor in EEPROM.");
 
-      adafruit_bno055_offsets_t calibrationData;
-      persistentData.get_calibration_data(calibrationData);
-      displaySensorOffsets(calibrationData);
-
+      displaySensorOffsets(pData.calibration_data);
       Serial.println("\n\nRestoring Calibration data to the BNO055...");
-      bno.setSensorOffsets(calibrationData);
+      bno.setSensorOffsets(pData.calibration_data);
 
       Serial.println("\n\nCalibration data loaded into BNO055");
       found_calib = true;
@@ -357,6 +364,9 @@ void setup() {
     server.on("/", HTTP_GET, handleRoot);
     server.on("/text", HTTP_GET, handleRootText);
     server.on("/uncalibrate", HTTP_GET, handleUncalibrate);
+    server.on("/axis_remap", HTTP_GET, handleAxisRemap);
+    server.on("/axis_remap", HTTP_POST, handleAxisRemapPost);
+
 
 
     server.on("/inline", [](AsyncWebServerRequest *request) {
@@ -471,19 +481,17 @@ void loop(){
       Serial.println("--------------------------------");
       Serial.println("Calibration Results: ");
       
-      adafruit_bno055_offsets_t calibrationData;
-      bno.getSensorOffsets(calibrationData);
-      persistentData.put_calibration_data(calibrationData);
+      bno.getSensorOffsets(pData.calibration_data);
 
       sensor_t sensor;
       bno.getSensor(&sensor);
-      persistentData.put_id(sensor.sensor_id);
+      pData.id = sensor.sensor_id;
 
-      displaySensorOffsets(calibrationData);
+      displaySensorOffsets(pData.calibration_data);
       Serial.println("\n\nStoring calibration data to EEPROM...");
       Serial.printf("\nSensor ID: %lx\n", sensor.sensor_id);
       
-      persistentData.commit();
+      pData.commit();
       Serial.println("Data stored to EEPROM.");
       found_calib = true;
 
@@ -583,7 +591,7 @@ void displaySensorOffsets(const adafruit_bno055_offsets_t &calibData)
 
 void clearCalib()
 {
-  persistentData.put_id(0L);
-  persistentData.commit();
+  pData.id = 0L;
+  pData.commit();
   Serial.println("Stored calibration invalidated.");
 }
