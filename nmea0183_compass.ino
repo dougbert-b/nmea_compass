@@ -74,14 +74,17 @@ public:
   Adafruit_BNO055::adafruit_bno055_axis_remap_config_t axis_config;
   Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t axis_sign;
 
-  void begin() {
-    EEPROM.begin(sizeof(this)); 
-    EEPROM.get(0, *this);
+  bool begin() {
+    bool ok = EEPROM.begin(sizeof(this)); 
+    if (ok) {
+      EEPROM.get(0, *this);
+    }
+    return ok;
   }
 
-  void commit() {
+  bool commit() {
     EEPROM.put(0, *this);
-    EEPROM.commit();
+    return EEPROM.commit();
   }
 };
 
@@ -128,11 +131,9 @@ const char *msgHeader =  "<!DOCTYPE html><html>"
                     "<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}"
                     ".button { background-color: #4CAF50; border: none; color: white; padding: 16px 40px;"
                     "text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}"
-                    ".button2 {background-color: #555555;}</style>"
-                    "<meta http-equiv=\"refresh\" content=\"2\">"
-                    "<title>ESP32 Compass Web Server</title>"
-                    "</head><body>"
-                    "<h1>ESP32 Compass Web Server</h1>";
+                    ".button2 {background-color: #555555;}</style>";
+
+                    
             
 const char *msgTrailer = "</body></html>";
 
@@ -142,6 +143,12 @@ void handleRoot(AsyncWebServerRequest *request){
   AsyncResponseStream *response = request->beginResponseStream("text/html");
   response->addHeader("Server","ESP Async Web Server");
   response->print(msgHeader);
+
+  response->print("<meta http-equiv=\"refresh\" content=\"2\">"
+                    "<title>ESP32 Compass Web Server</title>"
+                    "</head><body>"
+                    "<h1>ESP32 Compass Web Server</h1>");
+
   response->printf("<br>Build  %s  %s<br>", __DATE__, __TIME__);
   response->printf("<br>Heading: %4.4f<br>Roll (-y): %4.4f<br>Pitch (-z): %4.4f<br>",
                    orientationData.orientation.x, -orientationData.orientation.y, -orientationData.orientation.z);
@@ -151,6 +158,7 @@ void handleRoot(AsyncWebServerRequest *request){
   response->print("<br><br><a href=\"update\">Update Firmware</a>");
   response->print("<br><br><a href=\"uncalibrate\">Reset Compass Calibration</a>");
   response->print("<br><br><a href=\"axis_remap\">Remap Axes</a>");
+  response->print("<br><br><a href=\"reboot\">Reboot</a>");
 
   response->print(msgTrailer);
 
@@ -197,19 +205,37 @@ void handleUncalibrate(AsyncWebServerRequest *request) {
   request->send(200, "text/plain", message);
 }
 
+void handleReboot(AsyncWebServerRequest *request){
+  AsyncResponseStream *response = request->beginResponseStream("text/plain");
+  response->addHeader("Server","ESP Async Web Server");
+  response->printf("ESP32 Compass Web Server\n");
+  response->printf("Rebooting...\n");
+  request->send(response);
 
-void handleAxisRemap(AsyncWebServerRequest *request){
+  delay(1000);
+  ESP.restart(); 
+}
+
+void handleAxisRemap(AsyncWebServerRequest *request) {
+
+  const char *remapMsgHeader =  
+                    "<title>ESP32 Compass Axis Remapping</title>"
+                    "</head><body>"
+                    "<h1>Axis Remapping</h1>";
 
   AsyncResponseStream *response = request->beginResponseStream("text/html");
   response->addHeader("Server","ESP Async Web Server");
   response->print(msgHeader);
+  response->print(remapMsgHeader);
   response->printf("<form action=\"/axis_remap\" method=\"post\">");
-  response->printf("<label for=\"axis_remap\">Axis remap:</label><br>");
-  response->printf("<input type=\"text\" id=\"axis_remap\" name=\"axis_remap\" value=\"%02x\"><br>", pData.axis_config);
+  response->printf("<label for=\"axis_config\">Axis config:</label><br>");
+  response->printf("<input type=\"text\" id=\"axis_config\" name=\"axis_config\" value=\"%02x\"><br>", pData.axis_config);
   response->printf("<label for=\"axis_sign\">Axis sign:</label><br>");
   response->printf("<input type=\"text\" id=\"axis_sign\" name=\"axis_sign\" value=\"%02x\"><br>", pData.axis_sign);
-  response->printf("<input type=\"submit\" value=\"Submit\">");
+  response->printf("<br><input type=\"submit\" value=\"Submit\">");
   response->printf("</form>");
+  response->print("<br><br><a href=\"/\">Home</a>");
+  response->print(msgTrailer);
 
   request->send(response);
 }
@@ -218,10 +244,37 @@ void handleAxisRemapPost(AsyncWebServerRequest *request){
   int params = request->params();
   for (int i=0;i<params;i++){
     AsyncWebParameter* p = request->getParam(i);
-    if (p->isPost()){
-      Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
+    if (p->isPost()) {
+      int val = -1;
+      sscanf(p->value().c_str(), "%x", &val);
+
+      if (p->name() == "axis_config" && val >= 0 && val <= 0x3f) {
+        pData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)val;
+      }
+      else if (p->name() == "axis_sign" && val >= 0 && val <= 0x07) {
+        pData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)val;
+      }
     }
   }
+  pData.axis_valid = true;  
+  pData.commit();
+
+  const char *remapMsgHeader =  
+                    "<title>ESP32 Compass Axis Remapping</title>"
+                    "</head><body>"
+                    "<h1>Axis Remapping</h1>";
+
+  AsyncResponseStream *response = request->beginResponseStream("text/html");
+  response->addHeader("Server","ESP Async Web Server");
+  response->print(msgHeader);
+  response->print(remapMsgHeader);
+  response->printf("New values:  config 0x%x  sign 0x%x<br>", pData.axis_config, pData.axis_sign);
+  response->print("<br><br><a href=\"/\">Home</a>");
+  response->print("<br><br><a href=\"reboot\">Reboot</a>");
+
+  response->print(msgTrailer);
+
+  request->send(response);
 }
 
 void print_wakeup_reason(){
@@ -240,7 +293,6 @@ void print_wakeup_reason(){
 }
 
 unsigned long nextUpdate = 0;
-
 
 
 void setup() {
@@ -366,6 +418,7 @@ void setup() {
     server.on("/uncalibrate", HTTP_GET, handleUncalibrate);
     server.on("/axis_remap", HTTP_GET, handleAxisRemap);
     server.on("/axis_remap", HTTP_POST, handleAxisRemapPost);
+    server.on("/reboot", HTTP_GET, handleReboot);
 
 
 
