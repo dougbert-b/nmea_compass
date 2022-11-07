@@ -20,23 +20,20 @@
 #include <HardwareSerial.h>
 #include <EEPROM.h>
 
+/*
+    BLE stuff based on Neil Kolban example for IDF: https://github.com/nkolban/esp32-snippets/blob/master/cpp_utils/tests/BLE%20Tests/SampleServer.cpp
+    Ported to Arduino ESP32 by Evandro Copercini
+    updates by chegewara
+*/
+
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
 
 
-// Load Wi-Fi library
-#include <WiFi.h>
-
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
-
-#include <DNSServer.h>
-
-#include <AsyncElegantOTA.h>
-
-constexpr bool verbose = false;
+constexpr bool verbose = true;
 constexpr bool verbose_bno = false;
 
-
-bool wiFiActive = true;
 
 
 double DEG_2_RAD = 0.01745329251; //trig functions require radians, BNO055 outputs degrees
@@ -48,25 +45,18 @@ Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
 
 tNMEA0183* NMEA0183 = nullptr;
 
+sensors_event_t orientationData;
+uint8_t system_calib;
+uint8_t gyro_calib;
+uint8_t accel_calib;
+uint8_t mag_calib;
+uint8_t fully_calib;
 
-// Replace with your network credentials
-const char* ssid     = "Compass";
-const char* password = "1234567890";
-
-IPAddress apIp(192, 168, 4, 1);
-const char* hostname = "compass";
-
-
-DNSServer dnsServer;
-
-// Set web server port number to 80
-AsyncWebServer server(80);
-
-unsigned long lastConnectionTime = 0;
+bool found_calib = false;
 
 
-
-class PData {
+// Persistent Data
+class PersistentData {
 public:
   long id;
   adafruit_bno055_offsets_t calibration_data;
@@ -88,194 +78,285 @@ public:
   }
 };
 
-PData pData;
+PersistentData persistentData;
 
 
 
-void onWiFiEvent(arduino_event_id_t event) {
-  switch (event) {
-  case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
-    Serial.println("Station connected.");
-    lastConnectionTime = millis();
-    break;
-  case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
-    Serial.println("Station disconnected.");
-    lastConnectionTime = millis();
-    break;
-  case ARDUINO_EVENT_WIFI_AP_START:
-    if (WiFi.softAPsetHostname(hostname)) {
-      Serial.println("AP started, setting hostname");
-    }
-    break;
-  case ARDUINO_EVENT_WIFI_AP_STOP:
-    Serial.println("AP stopped.");
-    break;
+
+// Older versions of the BLE library would automatically resume advertising when the
+// client disconnected, but now we have to do that ourselves via this callback.
+class MyBLEServerCallbacks : public BLEServerCallbacks {
+public:
+  void onDisconnect(BLEServer *pServer) override;
+};
+
+void MyBLEServerCallbacks::onDisconnect(BLEServer *pServer)
+{
+  pServer->startAdvertising();
+}
+
+
+
+class My2901Descriptor : public BLEDescriptor {
+public:
+  My2901Descriptor(const char *description);
+  My2901Descriptor() = delete;
+};
+
+My2901Descriptor::My2901Descriptor(const char *description)
+  : BLEDescriptor(BLEUUID("2901"))
+{
+  setValue(description);
+  setAccessPermissions(ESP_GATT_PERM_READ);
+}
+
+
+// This class is both a Characteristic and a set of callbacks for it.
+class MyConfigDataCharacteristic : public BLECharacteristic, public BLECharacteristicCallbacks {
+public:
+  typedef void(*SetFunc)(uint8_t val);
+
+  MyConfigDataCharacteristic(const char *uuid, const char *descr, SetFunc setter = nullptr) : 
+    BLECharacteristic(BLEUUID(uuid), BLECharacteristic::PROPERTY_READ |
+                            BLECharacteristic::PROPERTY_WRITE ),
+    BLECharacteristicCallbacks(),
+    _val(0),
+    _setter(setter)
+  {
+    setValue(getValStr());  // In base class BLECharacteristic
+
+    // Do this after setValue(), to avoid weird loops.
+    setCallbacks(this);  // In base class BLECharacteristic
+
+    addDescriptor(new My2901Descriptor(descr));
+  }
+    
+  void onWrite(BLECharacteristic *characteristic) override;
+  uint8_t getVal() const { return _val; }
+  std::string getValStr() const;
+private:
+  uint8_t _val;
+  SetFunc _setter;
+};
+
+
+std::string
+MyConfigDataCharacteristic::getValStr() const
+{
+  char s[16];
+  snprintf(s, sizeof(s), "0x%x", _val);
+  return std::string(s);
+}
+
+void MyConfigDataCharacteristic::onWrite(BLECharacteristic *characteristic)
+{
+  if (characteristic == this) {
+    sscanf((char*)getData(), "%x", &_val);  // Convert BLE payload from ascii string to char.
+    if (_setter) _setter(_val);
+  } else {
+    log_e("Improper structure of angleCharacteristic!");
+  }
+}
+
+
+class MyAngleCharacteristic : public BLECharacteristic {
+public:
+  MyAngleCharacteristic(BLEService *pService, const char *uuid, const char *descr) : 
+    BLECharacteristic(BLEUUID(uuid), BLECharacteristic::PROPERTY_READ |
+                                     BLECharacteristic::PROPERTY_NOTIFY )
+  {
+    setValue("0.0");  // In base class BLECharacteristic
+    addDescriptor(new My2901Descriptor(descr));
+    pService->addCharacteristic(this);
   }
 
-}
-
-sensors_event_t orientationData;
-uint8_t system_calib;
-uint8_t gyro_calib;
-uint8_t accel_calib;
-uint8_t mag_calib;
-uint8_t fully_calib;
-
-bool found_calib = false;
-
-const char *msgHeader =  "<!DOCTYPE html><html>"
-                    "<head><name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-                    "<link rel=\"icon\" href=\"data:,\">"
-                    // CSS to style the on/off buttons 
-                    // Feel free to change the background-color and font-size attributes to fit your preferences
-                    "<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}"
-                    ".button { background-color: #4CAF50; border: none; color: white; padding: 16px 40px;"
-                    "text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}"
-                    ".button2 {background-color: #555555;}</style>";
-
-                    
-            
-const char *msgTrailer = "</body></html>";
+  void setVal(float val, bool noti=false) { setValue(std::to_string(val)); if (noti) notify(); }
+};
 
 
-void handleRoot(AsyncWebServerRequest *request){
-
-  AsyncResponseStream *response = request->beginResponseStream("text/html");
-  response->addHeader("Server","ESP Async Web Server");
-  response->print(msgHeader);
-
-  response->print("<meta http-equiv=\"refresh\" content=\"2\">"
-                    "<title>ESP32 Compass Web Server</title>"
-                    "</head><body>"
-                    "<h1>ESP32 Compass Web Server</h1>");
-
-  response->printf("<br>Build  %s  %s<br>", __DATE__, __TIME__);
-  response->printf("<br>Heading: %4.4f<br>Roll (-y): %4.4f<br>Pitch (-z): %4.4f<br>",
-                   orientationData.orientation.x, -orientationData.orientation.y, -orientationData.orientation.z);
-  response->printf("<br>Calibration:<br>system: %d  gyro: %d  accel: %d  mag: %d<br>", system_calib, gyro_calib, accel_calib, mag_calib);
-  response->printf("<br>fully_calib: %d<br>found_calib: %d", fully_calib, found_calib);
-  response->printf("<br>axis_config: 0x%02x<br>axis_sign: 0x%02x", pData.axis_config, pData.axis_sign);
-  response->print("<br><br><a href=\"update\">Update Firmware</a>");
-  response->print("<br><br><a href=\"uncalibrate\">Reset Compass Calibration</a>");
-  response->print("<br><br><a href=\"axis_remap\">Remap Axes</a>");
-  response->print("<br><br><a href=\"reboot\">Reboot</a>");
-
-  response->print(msgTrailer);
-
-  request->send(response);
-  lastConnectionTime = millis();
-}
-
-void handleRootText(AsyncWebServerRequest *request){
-
-  AsyncResponseStream *response = request->beginResponseStream("text/plain");
-  response->addHeader("Server","ESP Async Web Server");
-  response->printf("ESP32 Compass Web Server\n");
-  response->printf("Build %s  %s\n", __DATE__, __TIME__);
-  response->printf("Heading: %4.4f  Roll (-y): %4.4f  Pitch (-z): %4.4f\n",
-                   orientationData.orientation.x, -orientationData.orientation.y, -orientationData.orientation.z);
-  response->printf("Calibration: system: %d  gyro: %d  accel: %d  mag: %d\n", system_calib, gyro_calib, accel_calib, mag_calib);
-  response->printf("fully_calib: %d  found_calib: %d\n", fully_calib, found_calib);
-  response->printf("axis_config: 0x%02x  axis_sign: 0x%02x\n", pData.axis_config, pData.axis_sign);
-
-  request->send(response);
-  lastConnectionTime = millis();
-}
-
-
-void handleNotFound(AsyncWebServerRequest *request) {
-
-  String message = "File Not Found\n\n";
-  message += "URI: ";
-  message += request->url();
-  message += "\nMethod: ";
-  message += (request->method() == HTTP_GET) ? "GET" : "POST";
-  message += "\nArguments: ";
-  message += request->args();
-  message += "\n";
-  for (uint8_t i = 0; i < request->args(); i++) {
-    message += " " + request->argName(i) + ": " + request->arg(i) + "\n";
+class MyStringCharacteristic : public BLECharacteristic {
+public:
+  MyStringCharacteristic(BLEService *pService, const char *uuid, const char *descr) : 
+    BLECharacteristic(BLEUUID(uuid), BLECharacteristic::PROPERTY_READ |
+                                     BLECharacteristic::PROPERTY_NOTIFY )
+  {
+    setValue("");  // In base class BLECharacteristic
+    addDescriptor(new My2901Descriptor(descr));
+    pService->addCharacteristic(this);
   }
-  request->send(404, "text/plain", message);
+
+  void setVal(std::string val, bool noti=false) { setValue(val); if (noti) notify(); }
+};
+
+
+
+// This class is both a Characteristic and a set of callbacks for it.  It is write-only.
+class MyResetCharacteristic : public BLECharacteristic, public BLECharacteristicCallbacks {
+public:
+  typedef void(*ResetFunc)();
+
+  MyResetCharacteristic(BLEUUID uuid, ResetFunc resetter, const char *descr = nullptr) : 
+    BLECharacteristic(uuid, BLECharacteristic::PROPERTY_WRITE),
+    BLECharacteristicCallbacks(),
+    _resetter(resetter)
+  {
+    setValue("");
+
+    addDescriptor(new My2901Descriptor(descr ? descr : "reset"));
+
+    // Do this after setValue(), to avoid weird loops.
+    setCallbacks(this);  // In base class BLECharacteristic
+  }
+    
+  void onWrite(BLECharacteristic *characteristic) override;
+
+private:
+  ResetFunc _resetter;
+};
+
+
+
+void MyResetCharacteristic::onWrite(BLECharacteristic *characteristic)
+{
+
+  setValue("");  // Discard whatever value was written
+
+  if (characteristic == this) {
+    if (_resetter) _resetter();
+  } else {
+    log_e("Improper structure of resetCharacteristic!");
+  }
 }
 
-void handleUncalibrate(AsyncWebServerRequest *request) {
-  clearCalib();
-  String message = "Calibration erased - please power-cycle\n\n";
-  request->send(200, "text/plain", message);
+
+/* *****************************************************************
+    <!-- 180A: org.bluetooth.service.device_information -->
+    <service uuid="180A" id="device_information">
+        <description>Device Information</description>
+
+        <!-- 2A29: org.bluetooth.characteristic.manufacturer_name_string -->
+        <!-- (support for this characteristic is MANDATORY 
+              according to the profile spec) -->
+        <characteristic uuid="2A29" id="c_manufacturer_name">
+            <description>Manufacturer Name</description>
+            <properties read="true" const="true" />
+            <value>My SuperDuper Company</value>
+        </characteristic>
+
+        <!-- 2A24: org.bluetooth.characteristic.model_number_string -->
+        <characteristic uuid="2A24" id="c_model_number">
+            <description>Model Number</description>
+            <properties read="true" const="true" />
+            <value>TESTTHERMO-0001</value>
+        </characteristic>
+
+    </service>
+
+    ************************************************************************ */
+
+
+class DeviceInformationService
+{
+public:
+  DeviceInformationService() = delete;
+  DeviceInformationService(BLEServer *server);
+private:
+  BLEService *_service;
+  BLECharacteristic *_manufNameCharacteristic;
+  BLECharacteristic *_modelNumberCharacteristic;
+  BLECharacteristic *_firmwareRevCharacteristic;
+};
+
+DeviceInformationService::DeviceInformationService(BLEServer *server)
+{
+  _service = server->createService(BLEUUID("180a"), 32 /*numHandles*/);
+
+  _manufNameCharacteristic = _service->createCharacteristic("2a29", BLECharacteristic::PROPERTY_READ);
+  _manufNameCharacteristic->setValue("dougbraun.com");
+
+  _modelNumberCharacteristic = _service->createCharacteristic("2a24", BLECharacteristic::PROPERTY_READ);
+  _modelNumberCharacteristic->setValue("NMEA Compass 1.0");
+
+  _firmwareRevCharacteristic = _service->createCharacteristic("2a26", BLECharacteristic::PROPERTY_READ);
+  _firmwareRevCharacteristic->setValue(__DATE__);
+
+  _service->dump();
+
+  _service->start();
+  
 }
 
-void handleReboot(AsyncWebServerRequest *request){
-  AsyncResponseStream *response = request->beginResponseStream("text/plain");
-  response->addHeader("Server","ESP Async Web Server");
-  response->printf("ESP32 Compass Web Server\n");
-  response->printf("Rebooting...\n");
-  request->send(response);
 
+
+// See the following for generating UUIDs:
+// https://www.uuidgenerator.net/
+
+const char *SERVICE_UUID  =      "ac73740d-faf4-4c5c-a109-8abaaff98abc";
+
+const char *HEADING_UUID  =      "cd3fb5aa-c679-4d3e-9eb4-97912c27b298";
+const char *ROLL_UUID  =         "cd3fb5aa-c679-4d3e-9eb4-3990fa52213b";
+const char *PITCH_UUID  =        "cd3fb5aa-c679-4d3e-9eb4-f765e94d054b";
+const char *CALIBRATION_UUID =   "cd3fb5aa-c679-4d3e-9eb4-8ce31b0538c6";
+
+
+const char *AXIS_CONFIG_UUID =   "cd3fb5aa-c679-4d3e-9eb4-85b6bfc15110";
+const char *AXIS_SIGN_UUID =     "cd3fb5aa-c679-4d3e-9eb4-7ae7aed6bf55";
+
+
+const char *RESET_UUID =          "cd3fb5aa-c679-4d3e-9eb4-c12dcc1b4ccb";
+
+
+
+BLEServer *pServer(nullptr);
+BLEService *pService(nullptr);
+DeviceInformationService *pDeviceInfoService(nullptr);
+
+
+MyAngleCharacteristic *pHeadingChar(nullptr);
+MyAngleCharacteristic *pRollChar(nullptr);
+MyAngleCharacteristic *pPitchChar(nullptr);
+MyStringCharacteristic *pCalibChar(nullptr);
+
+
+MyConfigDataCharacteristic *pAxisConfigChar(nullptr);
+MyConfigDataCharacteristic *pAxisSignChar(nullptr);
+
+MyResetCharacteristic *pResetChar(nullptr);
+
+MyBLEServerCallbacks serverCallbacks;
+
+void resetEncoders(); // Defined a bit further down
+
+
+bool haveConnection(false);
+
+
+void resetEncoders() {
+}
+
+
+void reset()
+{
   delay(1000);
   ESP.restart(); 
 }
 
-void handleAxisRemap(AsyncWebServerRequest *request) {
 
-  const char *remapMsgHeader =  
-                    "<title>ESP32 Compass Axis Remapping</title>"
-                    "</head><body>"
-                    "<h1>Axis Remapping</h1>";
 
-  AsyncResponseStream *response = request->beginResponseStream("text/html");
-  response->addHeader("Server","ESP Async Web Server");
-  response->print(msgHeader);
-  response->print(remapMsgHeader);
-  response->printf("<form action=\"/axis_remap\" method=\"post\">");
-  response->printf("<label for=\"axis_config\">Axis config:</label><br>");
-  response->printf("<input type=\"text\" id=\"axis_config\" name=\"axis_config\" value=\"%02x\"><br>", pData.axis_config);
-  response->printf("<label for=\"axis_sign\">Axis sign:</label><br>");
-  response->printf("<input type=\"text\" id=\"axis_sign\" name=\"axis_sign\" value=\"%02x\"><br>", pData.axis_sign);
-  response->printf("<br><input type=\"submit\" value=\"Submit\">");
-  response->printf("</form>");
-  response->print("<br><br><a href=\"/\">Home</a>");
-  response->print(msgTrailer);
+void handleAxisRemapPost(){
+  int val = -1;
 
-  request->send(response);
-}
-
-void handleAxisRemapPost(AsyncWebServerRequest *request){
-  int params = request->params();
-  for (int i=0;i<params;i++){
-    AsyncWebParameter* p = request->getParam(i);
-    if (p->isPost()) {
-      int val = -1;
-      sscanf(p->value().c_str(), "%x", &val);
-
-      if (p->name() == "axis_config" && val >= 0 && val <= 0x3f) {
-        pData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)val;
-      }
-      else if (p->name() == "axis_sign" && val >= 0 && val <= 0x07) {
-        pData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)val;
-      }
-    }
+  if (val >= 0 && val <= 0x3f) {
+    persistentData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)val;
   }
-  pData.axis_valid = true;  
-  pData.commit();
-
-  const char *remapMsgHeader =  
-                    "<title>ESP32 Compass Axis Remapping</title>"
-                    "</head><body>"
-                    "<h1>Axis Remapping</h1>";
-
-  AsyncResponseStream *response = request->beginResponseStream("text/html");
-  response->addHeader("Server","ESP Async Web Server");
-  response->print(msgHeader);
-  response->print(remapMsgHeader);
-  response->printf("New values:  config 0x%x  sign 0x%x<br>", pData.axis_config, pData.axis_sign);
-  response->print("<br><br><a href=\"/\">Home</a>");
-  response->print("<br><br><a href=\"reboot\">Reboot</a>");
-
-  response->print(msgTrailer);
-
-  request->send(response);
+  else if (val >= 0 && val <= 0x07) {
+    persistentData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)val;
+  }
+  persistentData.axis_valid = true;  
+  persistentData.commit();
 }
+
+  
 
 void print_wakeup_reason(){
   esp_sleep_wakeup_cause_t wakeup_reason;
@@ -303,31 +384,36 @@ void setup() {
 
 
   // This will use the default I2C Wire pins.
-  if (!bno.begin())
-  {
+  if (!bno.begin()) {
     Serial.println("No BNO055 detected");
-    //while (1);
+    while (1);
   }
 
   // Note: The ESP32 EEPROM library is used differently than the official Arduino version.
-  pData.begin();
+  if (!persistentData.begin()) {
+    Serial.println("Cannot init EEPROM");
+    while (1);
+  }
 
-  if (!pData.axis_valid) {
+  if (!persistentData.axis_valid) {
     // First-time initialization
-    pData.axis_valid = true;
+    persistentData.axis_valid = true;
 
-    //pData.axis_config = Adafruit_BNO055::REMAP_CONFIG_P1;
-    //pData.axis_sign = Adafruit_BNO055::REMAP_SIGN_P1;
+    //persistentData.axis_config = Adafruit_BNO055::REMAP_CONFIG_P1;
+    //persistentData.axis_sign = Adafruit_BNO055::REMAP_SIGN_P1;
 
       // X = -Y, Y = Z, Z = -X  For mounting on forward side of vertical bulkhead, cable on right.
-    pData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09;
-    pData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05;
-    pData.commit();
+    persistentData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09;
+    persistentData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05;
+    if (!persistentData.commit()) {
+       Serial.println("Cannot commit to EEPROM");
+       while (1);
+    }
     Serial.println("Initialized axis remap");
   } else {
-    bno.setAxisRemap(pData.axis_config);
-    bno.setAxisSign(pData.axis_sign);
-    Serial.printf("Set axis data to 0x%x  0x%x\n", pData.axis_config, pData.axis_sign);
+    bno.setAxisRemap(persistentData.axis_config);
+    bno.setAxisSign(persistentData.axis_sign);
+    Serial.printf("Set axis data to 0x%x  0x%x\n", persistentData.axis_config, persistentData.axis_sign);
   }
 
 
@@ -340,10 +426,10 @@ void setup() {
   sensor_t sensor;
   bno.getSensor(&sensor);
 
-  if (pData.id != sensor.sensor_id)
+  if (persistentData.id != sensor.sensor_id)
   {
       Serial.println("\nNo Calibration Data for this sensor exists in EEPROM");
-      Serial.printf("\nSensor ID: %lx  Stored ID: %lx\n", sensor.sensor_id, pData.id);
+      Serial.printf("\nSensor ID: %lx  Stored ID: %lx\n", sensor.sensor_id, persistentData.id);
 
       delay(500);
   }
@@ -351,9 +437,9 @@ void setup() {
   {
       Serial.println("\nFound Calibration for this sensor in EEPROM.");
 
-      displaySensorOffsets(pData.calibration_data);
+      displaySensorOffsets(persistentData.calibration_data);
       Serial.println("\n\nRestoring Calibration data to the BNO055...");
-      bno.setSensorOffsets(pData.calibration_data);
+      bno.setSensorOffsets(persistentData.calibration_data);
 
       Serial.println("\n\nCalibration data loaded into BNO055");
       found_calib = true;
@@ -372,75 +458,60 @@ void setup() {
   NMEA0183->Open();
 
 
-  if (wiFiActive) {
+  Serial.println("Starting BLE server!");
 
-    WiFi.disconnect(true, true);
-    WiFi.softAPsetHostname("compass");
-    WiFi.mode(WIFI_AP);
+  // Hardware initialized here
 
-    WiFi.onEvent(onWiFiEvent, ARDUINO_EVENT_WIFI_AP_START);
-    WiFi.onEvent(onWiFiEvent, ARDUINO_EVENT_WIFI_AP_STACONNECTED);
-    WiFi.onEvent(onWiFiEvent, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
+  BLEDevice::init("DougCompass");
+  pServer = BLEDevice::createServer();
+  // Not needed at the moment  pServer->setCallbacks(&serverCallbacks);
+  
+  pDeviceInfoService = new DeviceInformationService(pServer);
 
-    Serial.println("Opening AP...");
-    WiFi.softAPConfig(apIp, apIp, IPAddress(255, 255, 255, 0));
-    WiFi.setTxPower(WIFI_POWER_8_5dBm);  // About 10% of max power
+  pService = pServer->createService(BLEUUID(SERVICE_UUID), 32 /*numHandles*/);
 
-    // Connect to Wi-Fi network with SSID and password
-    // Remove the password parameter, if you want the AP (Access Point) to be open
-    WiFi.softAP(ssid, password);
-    WiFi.softAPsetHostname("compass");
+  
+  pAxisConfigChar = new MyConfigDataCharacteristic(AXIS_CONFIG_UUID, "axis config");
+  pService->addCharacteristic(pAxisConfigChar);
 
-    IPAddress IP = WiFi.softAPIP();
-    Serial.print("AP IP address: ");
-    Serial.println(IP);
+  pAxisSignChar = new MyConfigDataCharacteristic(AXIS_SIGN_UUID, "axis sign");
+  pService->addCharacteristic(pAxisSignChar);
+ 
+  Serial.println("resolution done!");
 
-    String s = WiFi.softAPSSID();
-    Serial.print("AP SSID: ");
-    Serial.println(s);
-    
-    s = WiFi.softAPgetHostname();
-    Serial.print("hostname: ");
-    Serial.println(s);
-    
-    // setup after AP start (so IP exists)
-    //dnsServer.start(53, "compass", WiFi.softAPIP());
+  pHeadingChar = new MyAngleCharacteristic(pService, HEADING_UUID, "heading value");
+  pRollChar = new MyAngleCharacteristic(pService, ROLL_UUID, "roll value");
+  pPitchChar = new MyAngleCharacteristic(pService, PITCH_UUID, "pitch value");
 
-    // you can also put a * to resolve ALL DNS to this IP
-    dnsServer.start(53, "*", WiFi.softAPIP());
-    
-    
-    delay(100);
-    
-    
-    server.on("/", HTTP_GET, handleRoot);
-    server.on("/text", HTTP_GET, handleRootText);
-    server.on("/uncalibrate", HTTP_GET, handleUncalibrate);
-    server.on("/axis_remap", HTTP_GET, handleAxisRemap);
-    server.on("/axis_remap", HTTP_POST, handleAxisRemapPost);
-    server.on("/reboot", HTTP_GET, handleReboot);
+  pCalibChar = new MyStringCharacteristic(pService, CALIBRATION_UUID, "calibration");
+
+
+  Serial.println("pitch done!");
+
+
+  
+  pResetChar = new MyResetCharacteristic(BLEUUID(RESET_UUID), resetEncoders, "reset");
+  pService->addCharacteristic(pResetChar);
+  Serial.println("reset done!");
 
 
 
-    server.on("/inline", [](AsyncWebServerRequest *request) {
-      request->send(200, "text/plain", "this works as well");
-    });
+  pService->dump();
 
-    // respond to GET requests on URL /heap
-    server.on("/heap", HTTP_GET, [](AsyncWebServerRequest *request){
-      request->send(200, "text/plain", String(ESP.getFreeHeap()));
-    });
+  pService->start();
+  
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
+  pAdvertising->setMinPreferred(0x12);
 
+  BLEDevice::startAdvertising();
+  Serial.println("Initialization finished.");
+  Serial.println(BLEDevice::toString().c_str());
 
-    server.onNotFound(handleNotFound);
-
-    AsyncElegantOTA.begin(&server);
-    server.begin();
-    Serial.println("HTTP server started");
-  }
-
-  lastConnectionTime = millis();
 }
+  
   
 void light_sleep(unsigned long delay_us) {
 
@@ -455,7 +526,22 @@ void light_sleep(unsigned long delay_us) {
 }
 
 
-void loop(){
+void loop() {
+
+  // Detect and process a change in the connection state.
+  if (pServer->getConnectedCount() > 0) {
+    if (!haveConnection) {
+      Serial.printf("Got a connection!\n");
+      haveConnection = true;
+    }
+  } else {
+    if (haveConnection) {
+      Serial.printf("No longer connected.\n");
+      haveConnection = false;
+      pServer->startAdvertising();
+    }
+  }
+
 
   if (true || nextUpdate < millis()) {
     nextUpdate += 1000;
@@ -489,8 +575,10 @@ void loop(){
     bno.getCalibration(&system_calib, &gyro_calib, &accel_calib, &mag_calib);
     fully_calib = bno.isFullyCalibrated();
 
-    
-    
+    std::string cal_str = " S"+std::to_string(system_calib)+"  G"+std::to_string(gyro_calib)+"  A"+
+                          std::to_string(accel_calib)+"  M"+std::to_string(mag_calib);
+    pCalibChar->setVal(cal_str, haveConnection);
+        
     if (verbose_bno) {
       Serial.print("Calibration:  System: ");
       Serial.print(system_calib);
@@ -503,7 +591,9 @@ void loop(){
 
       Serial.print("  Fully calibrated: ");
       Serial.println(fully_calib);
+    }
 
+    if (verbose) {
       Serial.print("Heading: ");
       Serial.print(orientationData.orientation.x);
       Serial.print("  Roll (-y): ");
@@ -526,6 +616,11 @@ void loop(){
       NMEA0183->SendMessage(NMEA0183Msg);
     }
 
+
+    pHeadingChar->setVal(orientationData.orientation.x, haveConnection);
+    pRollChar->setVal(-orientationData.orientation.y, haveConnection);
+    pPitchChar->setVal(-orientationData.orientation.z, haveConnection);
+  
     
     
     if (!found_calib && bno.isFullyCalibrated()) {
@@ -534,17 +629,17 @@ void loop(){
       Serial.println("--------------------------------");
       Serial.println("Calibration Results: ");
       
-      bno.getSensorOffsets(pData.calibration_data);
+      bno.getSensorOffsets(persistentData.calibration_data);
 
       sensor_t sensor;
       bno.getSensor(&sensor);
-      pData.id = sensor.sensor_id;
+      persistentData.id = sensor.sensor_id;
 
-      displaySensorOffsets(pData.calibration_data);
+      displaySensorOffsets(persistentData.calibration_data);
       Serial.println("\n\nStoring calibration data to EEPROM...");
       Serial.printf("\nSensor ID: %lx\n", sensor.sensor_id);
       
-      pData.commit();
+      persistentData.commit();
       Serial.println("Data stored to EEPROM.");
       found_calib = true;
 
@@ -557,25 +652,14 @@ void loop(){
   delay(5); //allow LED to blink and the cpu to switch to other tasks
   digitalWrite(LED_BUILTIN, LOW);
   
-  if (wiFiActive) {
-    dnsServer.processNextRequest();
-  }
 
-  if (wiFiActive && (millis() > lastConnectionTime+180000)) {
-    // If there has been no web server activity in three minutes, turn off the WiFi
-    wiFiActive = false;
-    Serial.println("WiFi turned off due to inactivity");
-    WiFi.disconnect(true, true);
-    WiFi.mode(WIFI_OFF);
-  }
-  
-
-  if (wiFiActive) {
+  if (true) {
     delay(500);
   } else {
     light_sleep(500000L);
   }
-
+ 
+  
 }
 
 void printEvent(sensors_event_t* event) {
@@ -644,7 +728,7 @@ void displaySensorOffsets(const adafruit_bno055_offsets_t &calibData)
 
 void clearCalib()
 {
-  pData.id = 0L;
-  pData.commit();
+  persistentData.id = 0L;
+  persistentData.commit();
   Serial.println("Stored calibration invalidated.");
 }
