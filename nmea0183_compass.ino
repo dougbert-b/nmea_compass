@@ -18,7 +18,7 @@
 #include <NMEA0183Msg.h>
 #include <NMEA0183Messages.h>
 #include <HardwareSerial.h>
-#include <EEPROM.h>
+#include <Preferences.h>
 
 /*
     BLE stuff based on Neil Kolban example for IDF: https://github.com/nkolban/esp32-snippets/blob/master/cpp_utils/tests/BLE%20Tests/SampleServer.cpp
@@ -56,6 +56,9 @@ bool found_calib = false;
 
 
 // Persistent Data
+
+Preferences prefs;
+
 class PersistentData {
 public:
   long id;
@@ -64,17 +67,13 @@ public:
   Adafruit_BNO055::adafruit_bno055_axis_remap_config_t axis_config;
   Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t axis_sign;
 
-  bool begin() {
-    bool ok = EEPROM.begin(sizeof(this)); 
-    if (ok) {
-      EEPROM.get(0, *this);
-    }
-    return ok;
+  void begin() {
+    prefs.begin("compass_prefs"); 
+    prefs.getBytes("compass", this, sizeof(*this));
   }
 
-  bool commit() {
-    EEPROM.put(0, *this);
-    return EEPROM.commit();
+  void commit() {
+    prefs.putBytes("compass", this, sizeof(*this));
   }
 };
 
@@ -112,47 +111,51 @@ My2901Descriptor::My2901Descriptor(const char *description)
 
 
 // This class is both a Characteristic and a set of callbacks for it.
-class MyConfigDataCharacteristic : public BLECharacteristic, public BLECharacteristicCallbacks {
+class MyByteDataCharacteristic : public BLECharacteristic, public BLECharacteristicCallbacks {
 public:
-  typedef void(*SetFunc)(uint8_t val);
+  typedef std::function<void(uint8_t)> SetFunc;
+  typedef std::function<uint8_t()> GetFunc;
 
-  MyConfigDataCharacteristic(const char *uuid, const char *descr, SetFunc setter = nullptr) : 
+
+  MyByteDataCharacteristic(BLEService *pService, const char *uuid, const char *descr, GetFunc getter, SetFunc setter) : 
     BLECharacteristic(BLEUUID(uuid), BLECharacteristic::PROPERTY_READ |
-                            BLECharacteristic::PROPERTY_WRITE ),
+                            BLECharacteristic::PROPERTY_WRITE),
     BLECharacteristicCallbacks(),
-    _val(0),
+    _getter(getter),
     _setter(setter)
   {
-    setValue(getValStr());  // In base class BLECharacteristic
+     setValue(formatVal(_getter()));  // setValue() is in base class BLECharacteristic
 
     // Do this after setValue(), to avoid weird loops.
     setCallbacks(this);  // In base class BLECharacteristic
 
     addDescriptor(new My2901Descriptor(descr));
+    pService->addCharacteristic(this);
   }
     
   void onWrite(BLECharacteristic *characteristic) override;
-  uint8_t getVal() const { return _val; }
-  std::string getValStr() const;
+  std::string formatVal(uint8_t val) const;
 private:
-  uint8_t _val;
+  GetFunc _getter;
   SetFunc _setter;
 };
 
 
 std::string
-MyConfigDataCharacteristic::getValStr() const
+MyByteDataCharacteristic::formatVal(uint8_t val) const
 {
   char s[16];
-  snprintf(s, sizeof(s), "0x%x", _val);
+  snprintf(s, sizeof(s), "%x", val);
   return std::string(s);
 }
 
-void MyConfigDataCharacteristic::onWrite(BLECharacteristic *characteristic)
+void MyByteDataCharacteristic::onWrite(BLECharacteristic *characteristic)
 {
   if (characteristic == this) {
-    sscanf((char*)getData(), "%x", &_val);  // Convert BLE payload from ascii string to char.
-    if (_setter) _setter(_val);
+    uint8_t val;
+    sscanf((char*)getData(), "%x", &val);  // Convert BLE payload from ascii string to char.
+    if (_setter) _setter(val);
+    setValue(formatVal(_getter()));
   } else {
     log_e("Improper structure of angleCharacteristic!");
   }
@@ -195,7 +198,7 @@ class MyResetCharacteristic : public BLECharacteristic, public BLECharacteristic
 public:
   typedef void(*ResetFunc)();
 
-  MyResetCharacteristic(BLEUUID uuid, ResetFunc resetter, const char *descr = nullptr) : 
+  MyResetCharacteristic(BLEService *pService, BLEUUID uuid, ResetFunc resetter, const char *descr = nullptr) : 
     BLECharacteristic(uuid, BLECharacteristic::PROPERTY_WRITE),
     BLECharacteristicCallbacks(),
     _resetter(resetter)
@@ -206,6 +209,7 @@ public:
 
     // Do this after setValue(), to avoid weird loops.
     setCallbacks(this);  // In base class BLECharacteristic
+    pService->addCharacteristic(this);
   }
     
   void onWrite(BLECharacteristic *characteristic) override;
@@ -213,7 +217,6 @@ public:
 private:
   ResetFunc _resetter;
 };
-
 
 
 void MyResetCharacteristic::onWrite(BLECharacteristic *characteristic)
@@ -303,7 +306,7 @@ const char *AXIS_CONFIG_UUID =   "cd3fb5aa-c679-4d3e-9eb4-85b6bfc15110";
 const char *AXIS_SIGN_UUID =     "cd3fb5aa-c679-4d3e-9eb4-7ae7aed6bf55";
 
 
-const char *RESET_UUID =          "cd3fb5aa-c679-4d3e-9eb4-c12dcc1b4ccb";
+const char *CLEAR_CALIB_UUID =          "cd3fb5aa-c679-4d3e-9eb4-c12dcc1b4ccb";
 
 
 
@@ -318,24 +321,19 @@ MyAngleCharacteristic *pPitchChar(nullptr);
 MyStringCharacteristic *pCalibChar(nullptr);
 
 
-MyConfigDataCharacteristic *pAxisConfigChar(nullptr);
-MyConfigDataCharacteristic *pAxisSignChar(nullptr);
+MyByteDataCharacteristic *pAxisConfigChar(nullptr);
+MyByteDataCharacteristic *pAxisSignChar(nullptr);
 
-MyResetCharacteristic *pResetChar(nullptr);
+MyResetCharacteristic *pClearCalibChar(nullptr);
 
 MyBLEServerCallbacks serverCallbacks;
-
-void resetEncoders(); // Defined a bit further down
 
 
 bool haveConnection(false);
 
 
-void resetEncoders() {
-}
 
-
-void reset()
+void resetSystem()
 {
   delay(1000);
   ESP.restart(); 
@@ -383,6 +381,7 @@ void setup() {
   digitalWrite(LED_BUILTIN, LOW);
 
 
+
   // This will use the default I2C Wire pins.
   if (!bno.begin()) {
     Serial.println("No BNO055 detected");
@@ -390,10 +389,7 @@ void setup() {
   }
 
   // Note: The ESP32 EEPROM library is used differently than the official Arduino version.
-  if (!persistentData.begin()) {
-    Serial.println("Cannot init EEPROM");
-    while (1);
-  }
+  persistentData.begin();
 
   if (!persistentData.axis_valid) {
     // First-time initialization
@@ -405,10 +401,8 @@ void setup() {
       // X = -Y, Y = Z, Z = -X  For mounting on forward side of vertical bulkhead, cable on right.
     persistentData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09;
     persistentData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05;
-    if (!persistentData.commit()) {
-       Serial.println("Cannot commit to EEPROM");
-       while (1);
-    }
+    persistentData.commit();
+     
     Serial.println("Initialized axis remap");
   } else {
     bno.setAxisRemap(persistentData.axis_config);
@@ -471,11 +465,6 @@ void setup() {
   pService = pServer->createService(BLEUUID(SERVICE_UUID), 32 /*numHandles*/);
 
   
-  pAxisConfigChar = new MyConfigDataCharacteristic(AXIS_CONFIG_UUID, "axis config");
-  pService->addCharacteristic(pAxisConfigChar);
-
-  pAxisSignChar = new MyConfigDataCharacteristic(AXIS_SIGN_UUID, "axis sign");
-  pService->addCharacteristic(pAxisSignChar);
  
   Serial.println("resolution done!");
 
@@ -485,14 +474,19 @@ void setup() {
 
   pCalibChar = new MyStringCharacteristic(pService, CALIBRATION_UUID, "calibration");
 
-
-  Serial.println("pitch done!");
-
-
   
-  pResetChar = new MyResetCharacteristic(BLEUUID(RESET_UUID), resetEncoders, "reset");
-  pService->addCharacteristic(pResetChar);
-  Serial.println("reset done!");
+  pClearCalibChar = new MyResetCharacteristic(pService, BLEUUID(CLEAR_CALIB_UUID), clearCalib, "clear calibration");
+ 
+  pAxisConfigChar = new MyByteDataCharacteristic(pService, AXIS_CONFIG_UUID, "axis config", 
+                             []{ return (uint8_t)persistentData.axis_config; },
+                             [](uint8_t val){ persistentData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)val; }
+                          );
+
+
+  pAxisSignChar = new MyByteDataCharacteristic(pService, AXIS_SIGN_UUID, "axis sign", 
+                             []{ return (uint8_t)persistentData.axis_sign; },
+                             [](uint8_t val){ persistentData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)val; }
+                          );
 
 
 
@@ -576,7 +570,7 @@ void loop() {
     fully_calib = bno.isFullyCalibrated();
 
     std::string cal_str = " S"+std::to_string(system_calib)+"  G"+std::to_string(gyro_calib)+"  A"+
-                          std::to_string(accel_calib)+"  M"+std::to_string(mag_calib);
+                          std::to_string(accel_calib)+"  M"+std::to_string(mag_calib)+"  E"+std::to_string(persistentData.id);
     pCalibChar->setVal(cal_str, haveConnection);
         
     if (verbose_bno) {
@@ -731,4 +725,5 @@ void clearCalib()
   persistentData.id = 0L;
   persistentData.commit();
   Serial.println("Stored calibration invalidated.");
+  resetSystem();
 }
