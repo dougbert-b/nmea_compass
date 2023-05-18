@@ -385,7 +385,6 @@ bool goodCalibration() {
 
 
 unsigned long nextUpdate = 0;
-int nodeAddress;  // NMEA2000 device address
 
 // Set the information for other bus devices, which N2K messages we support
 const unsigned long transmitMessages[] PROGMEM = {127250L, 0};
@@ -499,7 +498,7 @@ void setup() {
                                 2006  // Just choosen free from code list on http://www.nmea.org/Assets/20121020%20nmea%202000%20registration%20list.pdf
                                 );
 
-  nodeAddress = prefs.getInt("LastNodeAddress", 34);  // Read stored last NodeAddress, default 34
+  int nodeAddress = prefs.getInt("LastNodeAddress", 34);  // Read stored last NodeAddress, default 34
 
   // If you also want to see all traffic on the bus use N2km_ListenAndNode instead of N2km_NodeOnly below
   NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, nodeAddress);
@@ -685,9 +684,9 @@ void loop() {
 
     // Check if SourceAddress has changed (due to address conflict on bus)
 
-    int currentAddress = NMEA2000.GetN2kSource();
-    if (currentAddress != nodeAddress) { // Save potentially changed Source Address to NVS memory
-      nodeAddress = currentAddress;
+    if (NMEA2000.ReadResetAddressChanged()) {
+      // Save potentially changed Source Address to NVS memory
+      int nodeAddress = NMEA2000.GetN2kSource();
       prefs.putInt("LastNodeAddress", nodeAddress);
     }
 
