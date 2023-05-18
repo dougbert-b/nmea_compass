@@ -9,6 +9,8 @@
    */
 
 
+#define ESP32_CAN_TX_PIN GPIO_NUM_5  // Set CAN TX port to 5 
+#define ESP32_CAN_RX_PIN GPIO_NUM_4   // Set CAN RX port to 4  // BTW, 4 is unavailable on Heltec
 
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
@@ -17,6 +19,10 @@
 #include <NMEA0183.h>
 #include <NMEA0183Msg.h>
 #include <NMEA0183Messages.h>
+
+#include <NMEA2000_CAN.h>     // This will automatically choose right CAN library and create suitable NMEA2000 object
+#include <N2kMessages.h>      // NMEA2000
+
 #include <HardwareSerial.h>
 #include <Preferences.h>
 
@@ -371,10 +377,24 @@ void print_wakeup_reason(){
   }
 }
 
+
+
+bool goodCalibration() {
+    return mag_calib > 0 && (system_calib + mag_calib) >= 2;
+}
+
+
 unsigned long nextUpdate = 0;
+int nodeAddress;  // NMEA2000 device address
+
+// Set the information for other bus devices, which N2K messages we support
+const unsigned long transmitMessages[] PROGMEM = {127250L, 0};
+
 
 
 void setup() {
+
+
   Serial.begin(115200);
   
   pinMode(LED_BUILTIN, OUTPUT);
@@ -390,6 +410,7 @@ void setup() {
 
   // Note: The ESP32 EEPROM library is used differently than the official Arduino version.
   persistentData.begin();
+
 
   if (!persistentData.axis_valid) {
     // First-time initialization
@@ -444,12 +465,50 @@ void setup() {
   /* Crystal must be configured AFTER loading calibration data into BNO055. */
   bno.setExtCrystalUse(true);
 
-  // For NMEA output on ESP32
+  // For NMEA0183 output on ESP32
   Serial2.begin(4800, SERIAL_8N1, 16 /*Rx pin*/, 17 /*Tx pin*/, true /*invert*/);
-
 
   NMEA0183 = new tNMEA0183(&Serial2);
   NMEA0183->Open();
+
+  // Reserve enough buffer for sending all messages.
+  NMEA2000.SetN2kCANMsgBufSize(8);
+  NMEA2000.SetN2kCANReceiveFrameBufSize(150);
+  NMEA2000.SetN2kCANSendFrameBufSize(150);
+
+  // Generate unique number from chip id
+  uint8_t chipid[6];
+  esp_efuse_mac_get_default(chipid);
+
+  uint32_t id = 0;
+  for (int i = 0; i < 6; i++) id += (chipid[i] << (7 * i));
+
+  // Set product information
+  NMEA2000.SetProductInformation("001",                // Manufacturer's Model serial code
+                                  1,                   // Manufacturer's product code
+                                 "Doug Compass",       // Manufacturer's Model ID
+                                 __DATE__,             // Manufacturer's Software version code
+                                 "1.0",                // Manufacturer's Model version
+                                 1                     // Load Equivalency  (units of 50mA)
+                                 );
+
+   // Set device information
+  NMEA2000.SetDeviceInformation(id,   // Unique number. Use e.g. Serial number.
+                                140,  // Device function=Analog to NMEA 2000 Gateway. See codes on http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
+                                25,   // Device class=Inter/Intranetwork Device. See codes on  http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
+                                2006  // Just choosen free from code list on http://www.nmea.org/Assets/20121020%20nmea%202000%20registration%20list.pdf
+                                );
+
+  nodeAddress = prefs.getInt("LastNodeAddress", 34);  // Read stored last NodeAddress, default 34
+
+  // If you also want to see all traffic on the bus use N2km_ListenAndNode instead of N2km_NodeOnly below
+  NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, nodeAddress);
+  NMEA2000.ExtendTransmitMessages(transmitMessages);
+  Serial.print("setup 2\n");
+
+  if (!NMEA2000.Open()) {
+    Serial.println("NMEA2000.Open failed");
+  }
 
 
   Serial.println("Starting BLE server!");
@@ -570,7 +629,8 @@ void loop() {
     fully_calib = bno.isFullyCalibrated();
 
     std::string cal_str = " S"+std::to_string(system_calib)+"  G"+std::to_string(gyro_calib)+"  A"+
-                          std::to_string(accel_calib)+"  M"+std::to_string(mag_calib)+"  E"+std::to_string(persistentData.id);
+                          std::to_string(accel_calib)+"  M"+std::to_string(mag_calib)+
+                          "  "+(goodCalibration() ? "OK" : "NG")+"  E"+std::to_string(persistentData.id);
     pCalibChar->setVal(cal_str, haveConnection);
         
     if (verbose_bno) {
@@ -585,6 +645,9 @@ void loop() {
 
       Serial.print("  Fully calibrated: ");
       Serial.println(fully_calib);
+
+      Serial.print("  NMEA Valid output: ");
+      Serial.println(goodCalibration());
     }
 
     if (verbose) {
@@ -598,11 +661,11 @@ void loop() {
 
     double heading;
     if (mag_calib > 0 && system_calib + mag_calib >= 2) {
-      digitalWrite(LED_BUILTIN, HIGH);
+      digitalWrite(LED_BUILTIN, HIGH);  // Indicate NMEA data transmission
       // The NMEA0183 API wants heading in radians
-      heading = orientationData.orientation.x * (2*PI/360.0);
+      heading = DegToRad(orientationData.orientation.x);
     } else {
-      heading = NMEA0183DoubleNA;  // Send a blank value
+      heading = NMEA0183DoubleNA;  // Send a blank value  (N2KDoubleNA is the same value)
     }
 
     tNMEA0183Msg NMEA0183Msg;
@@ -610,13 +673,30 @@ void loop() {
       NMEA0183->SendMessage(NMEA0183Msg);
     }
 
+    tN2kMsg N2kMsg;
+    SetN2kMagneticHeading(N2kMsg, 0, heading, 0.0, 0.0);
+    //Serial.println("sending CAN");
+    NMEA2000.SendMsg(N2kMsg);
+
+    SetN2kAttitude(N2kMsg, 0, 0.0, DegToRad(-orientationData.orientation.z), DegToRad(-orientationData.orientation.y));
+    NMEA2000.SendMsg(N2kMsg);
+
+    NMEA2000.ParseMessages();
+
+    // Check if SourceAddress has changed (due to address conflict on bus)
+
+    int currentAddress = NMEA2000.GetN2kSource();
+    if (currentAddress != nodeAddress) { // Save potentially changed Source Address to NVS memory
+      nodeAddress = currentAddress;
+      prefs.putInt("LastNodeAddress", nodeAddress);
+    }
+
 
     pHeadingChar->setVal(orientationData.orientation.x, haveConnection);
     pRollChar->setVal(-orientationData.orientation.y, haveConnection);
     pPitchChar->setVal(-orientationData.orientation.z, haveConnection);
   
-    
-    
+        
     if (!found_calib && bno.isFullyCalibrated()) {
 
       Serial.println("\nFully calibrated!");
