@@ -9,8 +9,8 @@
    */
 
 
-#define ESP32_CAN_TX_PIN GPIO_NUM_5  // Set CAN TX port to 5 
-#define ESP32_CAN_RX_PIN GPIO_NUM_4   // Set CAN RX port to 4  // BTW, 4 is unavailable on Heltec
+#define ESP32_CAN_TX_PIN GPIO_NUM_32  // Set CAN TX port 
+#define ESP32_CAN_RX_PIN GPIO_NUM_33   // Set CAN RX port  // BTW, 4 is unavailable on Heltec
 
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
@@ -426,8 +426,8 @@ bool goodCalibration() {
 
 unsigned long nextUpdate = 0;
 
-// Set the information for other bus devices, which N2K messages we support
-const unsigned long transmitMessages[] PROGMEM = {127250L, 0};
+// Set the information for other bus devices, which N2K messages we support: Heading and Attitude
+const unsigned long transmitMessages[] PROGMEM = {127250L, 127571L, 0};
 
 
 
@@ -720,7 +720,7 @@ void loop() {
     }
 
     tN2kMsg N2kMsg;
-    SetN2kMagneticHeading(N2kMsg, 0, heading, 0.0, 0.0);
+    SetN2kMagneticHeading(N2kMsg, 0, heading);
     //Serial.println("sending CAN");
     NMEA2000.SendMsg(N2kMsg);
 
