@@ -67,16 +67,39 @@ Preferences prefs;
 
 class PersistentData {
 public:
-  long id;
+  long sensor_id;  // If non-zero and equal to actual sensor ID, calibration_data is valid
   adafruit_bno055_offsets_t calibration_data;
-  bool axis_valid;
+  bool data_valid;
   Adafruit_BNO055::adafruit_bno055_axis_remap_config_t axis_config;
   Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t axis_sign;
+  int node_address;  // For NMEA2K, default is 34
+  float roll_offset;
+  float pitch_offset;
 
   void begin() {
     prefs.begin("compass_prefs"); 
     prefs.getBytes("compass", this, sizeof(*this));
   }
+
+  void init() {
+    // Call commit() after this!
+
+    sensor_id = 0;  // Mark calibration_data as invalid
+    data_valid = true;
+
+    //axis_config = Adafruit_BNO055::REMAP_CONFIG_P1;
+    //axis_sign = Adafruit_BNO055::REMAP_SIGN_P1;
+
+      // X = -Y, Y = Z, Z = -X  For mounting on forward side of vertical bulkhead, cable on right.
+    axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09;
+    axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05;
+
+    node_address = 34;
+
+    roll_offset = 0.0;
+    pitch_offset = 0.0;
+  }
+
 
   void commit() {
     prefs.putBytes("compass", this, sizeof(*this));
@@ -116,14 +139,14 @@ My2901Descriptor::My2901Descriptor(const char *description)
 }
 
 
-// This class is both a Characteristic and a set of callbacks for it.
-class MyByteDataCharacteristic : public BLECharacteristic, public BLECharacteristicCallbacks {
+// This class is both a r/w Characteristic and a set of callbacks for it.
+template<typename DT> class MyDataCharacteristic : public BLECharacteristic, public BLECharacteristicCallbacks {
 public:
-  typedef std::function<void(uint8_t)> SetFunc;
-  typedef std::function<uint8_t()> GetFunc;
+  typedef std::function<void(DT)> SetFunc;
+  typedef std::function<DT()> GetFunc;
 
 
-  MyByteDataCharacteristic(BLEService *pService, const char *uuid, const char *descr, GetFunc getter, SetFunc setter) : 
+  MyDataCharacteristic(BLEService *pService, const char *uuid, const char *descr, GetFunc getter, SetFunc setter) : 
     BLECharacteristic(BLEUUID(uuid), BLECharacteristic::PROPERTY_READ |
                             BLECharacteristic::PROPERTY_WRITE),
     BLECharacteristicCallbacks(),
@@ -139,15 +162,21 @@ public:
     pService->addCharacteristic(this);
   }
     
-  void onWrite(BLECharacteristic *characteristic) override;
-  std::string formatVal(uint8_t val) const;
+  void onWrite(BLECharacteristic *characteristic) override;  // Needs specialization
+  std::string formatVal(DT val) const;  // Needs specialization
 private:
   GetFunc _getter;
   SetFunc _setter;
 };
 
 
-std::string
+typedef MyDataCharacteristic<uint8_t> MyByteDataCharacteristic;
+typedef MyDataCharacteristic<float> MyFloatDataCharacteristic;
+
+
+
+
+template<> std::string
 MyByteDataCharacteristic::formatVal(uint8_t val) const
 {
   char s[16];
@@ -155,17 +184,43 @@ MyByteDataCharacteristic::formatVal(uint8_t val) const
   return std::string(s);
 }
 
-void MyByteDataCharacteristic::onWrite(BLECharacteristic *characteristic)
+template<> void
+MyByteDataCharacteristic::onWrite(BLECharacteristic *characteristic)
 {
   if (characteristic == this) {
     uint8_t val;
-    sscanf((char*)getData(), "%x", &val);  // Convert BLE payload from ascii string to char.
+    sscanf((char*)getData(), "%x", &val);  // Convert BLE payload from ascii hex string to char.
     if (_setter) _setter(val);
     setValue(formatVal(_getter()));
   } else {
-    log_e("Improper structure of angleCharacteristic!");
+    log_e("Improper structure of byteDataCharacteristic!");
   }
 }
+
+
+template<> std::string
+MyFloatDataCharacteristic::formatVal(float val) const
+{
+  char s[16];
+  snprintf(s, sizeof(s), "%4.2f", val);
+  return std::string(s);
+}
+
+template<> void
+MyFloatDataCharacteristic::onWrite(BLECharacteristic *characteristic)
+{
+  if (characteristic == this) {
+    float val;
+    sscanf((char*)getData(), "%f", &val);  // Convert BLE payload from ascii string to float.
+    if (_setter) _setter(val);
+    setValue(formatVal(_getter()));
+  } else {
+    log_e("Improper structure of floatDataCharacteristic!");
+  }
+}
+
+
+
 
 
 class MyAngleCharacteristic : public BLECharacteristic {
@@ -307,25 +362,25 @@ const char *ROLL_UUID  =         "cd3fb5aa-c679-4d3e-9eb4-3990fa52213b";
 const char *PITCH_UUID  =        "cd3fb5aa-c679-4d3e-9eb4-f765e94d054b";
 const char *CALIBRATION_UUID =   "cd3fb5aa-c679-4d3e-9eb4-8ce31b0538c6";
 
-
 const char *AXIS_CONFIG_UUID =   "cd3fb5aa-c679-4d3e-9eb4-85b6bfc15110";
 const char *AXIS_SIGN_UUID =     "cd3fb5aa-c679-4d3e-9eb4-7ae7aed6bf55";
 
+const char *ROLL_OFFSET_UUID =   "cd3fb5aa-c679-4d3e-9eb4-a0b507178d86";
+const char *PITCH_OFFSET_UUID =  "cd3fb5aa-c679-4d3e-9eb4-361609541a10";
 
 const char *CLEAR_CALIB_UUID =          "cd3fb5aa-c679-4d3e-9eb4-c12dcc1b4ccb";
-
-
 
 BLEServer *pServer(nullptr);
 BLEService *pService(nullptr);
 DeviceInformationService *pDeviceInfoService(nullptr);
-
 
 MyAngleCharacteristic *pHeadingChar(nullptr);
 MyAngleCharacteristic *pRollChar(nullptr);
 MyAngleCharacteristic *pPitchChar(nullptr);
 MyStringCharacteristic *pCalibChar(nullptr);
 
+MyFloatDataCharacteristic *pRollOffsetChar(nullptr);
+MyFloatDataCharacteristic *pPitchOffsetChar(nullptr);
 
 MyByteDataCharacteristic *pAxisConfigChar(nullptr);
 MyByteDataCharacteristic *pAxisSignChar(nullptr);
@@ -343,21 +398,6 @@ void resetSystem()
 {
   delay(1000);
   ESP.restart(); 
-}
-
-
-
-void handleAxisRemapPost(){
-  int val = -1;
-
-  if (val >= 0 && val <= 0x3f) {
-    persistentData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)val;
-  }
-  else if (val >= 0 && val <= 0x07) {
-    persistentData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)val;
-  }
-  persistentData.axis_valid = true;  
-  persistentData.commit();
 }
 
   
@@ -411,26 +451,17 @@ void setup() {
   persistentData.begin();
 
 
-  if (!persistentData.axis_valid) {
-    // First-time initialization
-    persistentData.axis_valid = true;
-
-    //persistentData.axis_config = Adafruit_BNO055::REMAP_CONFIG_P1;
-    //persistentData.axis_sign = Adafruit_BNO055::REMAP_SIGN_P1;
-
-      // X = -Y, Y = Z, Z = -X  For mounting on forward side of vertical bulkhead, cable on right.
-    persistentData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09;
-    persistentData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05;
-    persistentData.commit();
-     
-    Serial.println("Initialized axis remap");
-  } else {
-    bno.setAxisRemap(persistentData.axis_config);
-    bno.setAxisSign(persistentData.axis_sign);
-    Serial.printf("Set axis data to 0x%x  0x%x\n", persistentData.axis_config, persistentData.axis_sign);
+  if (!persistentData.data_valid) {
+    // First-time initialization of persistent data
+    persistentData.init();
+    persistentData.commit();  
+    Serial.println("Initialized persistent data");
   }
 
-
+  bno.setAxisRemap(persistentData.axis_config);
+  bno.setAxisSign(persistentData.axis_sign);
+  Serial.printf("Set sensor axis data to 0x%x  0x%x\n", persistentData.axis_config, persistentData.axis_sign);
+  
 
   /*
   *  Read the sensor's unique ID in the EEPROM.
@@ -440,10 +471,10 @@ void setup() {
   sensor_t sensor;
   bno.getSensor(&sensor);
 
-  if (persistentData.id != sensor.sensor_id)
+  if (persistentData.sensor_id != sensor.sensor_id)
   {
       Serial.println("\nNo Calibration Data for this sensor exists in EEPROM");
-      Serial.printf("\nSensor ID: %lx  Stored ID: %lx\n", sensor.sensor_id, persistentData.id);
+      Serial.printf("\nSensor ID: %lx  Stored ID: %lx\n", sensor.sensor_id, persistentData.sensor_id);
 
       delay(500);
   }
@@ -498,10 +529,9 @@ void setup() {
                                 2006  // Just choosen free from code list on http://www.nmea.org/Assets/20121020%20nmea%202000%20registration%20list.pdf
                                 );
 
-  int nodeAddress = prefs.getInt("LastNodeAddress", 34);  // Read stored last NodeAddress, default 34
 
   // If you also want to see all traffic on the bus use N2km_ListenAndNode instead of N2km_NodeOnly below
-  NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, nodeAddress);
+  NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, persistentData.node_address);   // Read stored last NodeAddress, default 34
   NMEA2000.ExtendTransmitMessages(transmitMessages);
   Serial.print("setup 2\n");
 
@@ -537,14 +567,25 @@ void setup() {
  
   pAxisConfigChar = new MyByteDataCharacteristic(pService, AXIS_CONFIG_UUID, "axis config", 
                              []{ return (uint8_t)persistentData.axis_config; },
-                             [](uint8_t val){ persistentData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)val; }
+                             [](uint8_t val){ persistentData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)val; persistentData.commit();}
                           );
 
 
   pAxisSignChar = new MyByteDataCharacteristic(pService, AXIS_SIGN_UUID, "axis sign", 
                              []{ return (uint8_t)persistentData.axis_sign; },
-                             [](uint8_t val){ persistentData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)val; }
+                             [](uint8_t val){ persistentData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)val; persistentData.commit();}
                           );
+
+  pRollOffsetChar = new MyFloatDataCharacteristic(pService, ROLL_OFFSET_UUID, "roll offset", 
+                             []{ return persistentData.roll_offset; },
+                             [](float val){ persistentData.roll_offset = val; persistentData.commit();}
+                          );
+
+pPitchOffsetChar = new MyFloatDataCharacteristic(pService, PITCH_OFFSET_UUID, "pitch offset", 
+                             []{ return persistentData.pitch_offset; },
+                             [](float val){ persistentData.pitch_offset = val; persistentData.commit();}
+                          );
+
 
 
 
@@ -600,6 +641,10 @@ void loop() {
   
 
     bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+    // In degrees
+    float rawHeading = orientationData.orientation.x;
+    float rawRoll = -orientationData.orientation.y;
+    float rawPitch = -orientationData.orientation.z;
 
     if (verbose_bno) {
       
@@ -629,7 +674,7 @@ void loop() {
 
     std::string cal_str = " S"+std::to_string(system_calib)+"  G"+std::to_string(gyro_calib)+"  A"+
                           std::to_string(accel_calib)+"  M"+std::to_string(mag_calib)+
-                          "  "+(goodCalibration() ? "OK" : "NG")+"  E"+std::to_string(persistentData.id);
+                          "  "+(goodCalibration() ? "OK" : "NG")+"  E"+std::to_string(persistentData.sensor_id);
     pCalibChar->setVal(cal_str, haveConnection);
         
     if (verbose_bno) {
@@ -649,20 +694,22 @@ void loop() {
       Serial.println(goodCalibration());
     }
 
+ 
+
     if (verbose) {
       Serial.print("Heading: ");
-      Serial.print(orientationData.orientation.x);
+      Serial.print(rawHeading);
       Serial.print("  Roll (-y): ");
-      Serial.print(-orientationData.orientation.y);
+      Serial.print(rawRoll);
       Serial.print("  Pitch (-z): ");
-      Serial.println(-orientationData.orientation.z);
+      Serial.println(rawPitch);
     }
 
     double heading;
-    if (mag_calib > 0 && system_calib + mag_calib >= 2) {
+    if (goodCalibration()) {
       digitalWrite(LED_BUILTIN, HIGH);  // Indicate NMEA data transmission
       // The NMEA0183 API wants heading in radians
-      heading = DegToRad(orientationData.orientation.x);
+      heading = DegToRad(rawHeading);
     } else {
       heading = NMEA0183DoubleNA;  // Send a blank value  (N2KDoubleNA is the same value)
     }
@@ -677,7 +724,8 @@ void loop() {
     //Serial.println("sending CAN");
     NMEA2000.SendMsg(N2kMsg);
 
-    SetN2kAttitude(N2kMsg, 0, 0.0, DegToRad(-orientationData.orientation.z), DegToRad(-orientationData.orientation.y));
+    // We send the actual roll/patch values even if the sensor is not calibrated.
+    SetN2kAttitude(N2kMsg, 0, 0.0, DegToRad(rawPitch + persistentData.pitch_offset), DegToRad(rawRoll + persistentData.roll_offset));
     NMEA2000.SendMsg(N2kMsg);
 
     NMEA2000.ParseMessages();
@@ -686,14 +734,14 @@ void loop() {
 
     if (NMEA2000.ReadResetAddressChanged()) {
       // Save potentially changed Source Address to NVS memory
-      int nodeAddress = NMEA2000.GetN2kSource();
-      prefs.putInt("LastNodeAddress", nodeAddress);
+      persistentData.node_address = NMEA2000.GetN2kSource();
+      persistentData.commit();
     }
 
-
-    pHeadingChar->setVal(orientationData.orientation.x, haveConnection);
-    pRollChar->setVal(-orientationData.orientation.y, haveConnection);
-    pPitchChar->setVal(-orientationData.orientation.z, haveConnection);
+    // These BLE Characteristics are raw uncorrected sensor values
+    pHeadingChar->setVal(rawHeading, haveConnection);
+    pRollChar->setVal(rawRoll, haveConnection);
+    pPitchChar->setVal(rawPitch, haveConnection);
   
         
     if (!found_calib && bno.isFullyCalibrated()) {
@@ -706,7 +754,7 @@ void loop() {
 
       sensor_t sensor;
       bno.getSensor(&sensor);
-      persistentData.id = sensor.sensor_id;
+      persistentData.sensor_id = sensor.sensor_id;
 
       displaySensorOffsets(persistentData.calibration_data);
       Serial.println("\n\nStoring calibration data to EEPROM...");
@@ -801,7 +849,8 @@ void displaySensorOffsets(const adafruit_bno055_offsets_t &calibData)
 
 void clearCalib()
 {
-  persistentData.id = 0L;
+  // Preserve all the other persistent parameters
+  persistentData.sensor_id = 0L;
   persistentData.commit();
   Serial.println("Stored calibration invalidated.");
   resetSystem();
