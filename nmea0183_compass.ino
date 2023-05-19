@@ -424,7 +424,6 @@ bool goodCalibration() {
 }
 
 
-unsigned long nextUpdate = 0;
 
 // Set the information for other bus devices, which N2K messages we support: Heading and Attitude
 const unsigned long transmitMessages[] PROGMEM = {127250L, 127571L, 0};
@@ -619,9 +618,11 @@ void light_sleep(unsigned long delay_us) {
 }
 
 
+unsigned long nextUpdate = 0;
+
 void loop() {
 
-  // Detect and process a change in the connection state.
+  // Detect and process a change in the BLE connection state.
   if (pServer->getConnectedCount() > 0) {
     if (!haveConnection) {
       Serial.printf("Got a connection!\n");
@@ -635,9 +636,9 @@ void loop() {
     }
   }
 
-
-  if (true || nextUpdate < millis()) {
-    nextUpdate += 1000;
+  unsigned long curTime = millis();
+  if (curTime > nextUpdate) {
+    nextUpdate = curTime + 500;
   
 
     bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
@@ -728,8 +729,6 @@ void loop() {
     SetN2kAttitude(N2kMsg, 0, 0.0, DegToRad(rawPitch + persistentData.pitch_offset), DegToRad(rawRoll + persistentData.roll_offset));
     NMEA2000.SendMsg(N2kMsg);
 
-    NMEA2000.ParseMessages();
-
     // Check if SourceAddress has changed (due to address conflict on bus)
 
     if (NMEA2000.ReadResetAddressChanged()) {
@@ -765,22 +764,15 @@ void loop() {
       found_calib = true;
 
       Serial.println("\n--------------------------------\n");
-      delay(500);
     }
 
+    delay(5); //allow LED to blink and the cpu to switch to other tasks
+    digitalWrite(LED_BUILTIN, LOW);
+
   }
 
-  delay(5); //allow LED to blink and the cpu to switch to other tasks
-  digitalWrite(LED_BUILTIN, LOW);
-  
+  NMEA2000.ParseMessages();
 
-  if (true) {
-    delay(500);
-  } else {
-    light_sleep(500000L);
-  }
- 
-  
 }
 
 void printEvent(sensors_event_t* event) {
