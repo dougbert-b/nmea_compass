@@ -10,7 +10,7 @@
 
 
 #define ESP32_CAN_TX_PIN GPIO_NUM_32  // Set CAN TX port 
-#define ESP32_CAN_RX_PIN GPIO_NUM_33   // Set CAN RX port  // BTW, 4 is unavailable on Heltec
+#define ESP32_CAN_RX_PIN GPIO_NUM_34   // Set CAN RX port  // BTW, 4 is unavailable on Heltec
 
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
