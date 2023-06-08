@@ -1,4 +1,4 @@
-   /* Hardware pinout for DSP32 DEVKIT board
+   /* Hardware pinout for ESP32 DEVKIT board
 
    Magnetometer:
    SDA = 21;
@@ -255,18 +255,18 @@ public:
 
 
 // This class is both a Characteristic and a set of callbacks for it.  It is write-only.
-class MyResetCharacteristic : public BLECharacteristic, public BLECharacteristicCallbacks {
+class MyActionCharacteristic : public BLECharacteristic, public BLECharacteristicCallbacks {
 public:
-  typedef void(*ResetFunc)();
+  typedef void(*ActionFunc)();
 
-  MyResetCharacteristic(BLEService *pService, BLEUUID uuid, ResetFunc resetter, const char *descr = nullptr) : 
+  MyActionCharacteristic(BLEService *pService, BLEUUID uuid, ActionFunc actor, const char *descr = nullptr) : 
     BLECharacteristic(uuid, BLECharacteristic::PROPERTY_WRITE),
     BLECharacteristicCallbacks(),
-    _resetter(resetter)
+    _actor(actor)
   {
     setValue("");
 
-    addDescriptor(new My2901Descriptor(descr ? descr : "reset"));
+    addDescriptor(new My2901Descriptor(descr ? descr : "action"));
 
     // Do this after setValue(), to avoid weird loops.
     setCallbacks(this);  // In base class BLECharacteristic
@@ -276,19 +276,19 @@ public:
   void onWrite(BLECharacteristic *characteristic) override;
 
 private:
-  ResetFunc _resetter;
+  ActionFunc _actor;
 };
 
 
-void MyResetCharacteristic::onWrite(BLECharacteristic *characteristic)
+void MyActionCharacteristic::onWrite(BLECharacteristic *characteristic)
 {
 
   setValue("");  // Discard whatever value was written
 
   if (characteristic == this) {
-    if (_resetter) _resetter();
+    if (_actor) _actor();
   } else {
-    log_e("Improper structure of resetCharacteristic!");
+    log_e("Improper structure of actionCharacteristic!");
   }
 }
 
@@ -368,7 +368,9 @@ const char *AXIS_SIGN_UUID =     "cd3fb5aa-c679-4d3e-9eb4-7ae7aed6bf55";
 const char *ROLL_OFFSET_UUID =   "cd3fb5aa-c679-4d3e-9eb4-a0b507178d86";
 const char *PITCH_OFFSET_UUID =  "cd3fb5aa-c679-4d3e-9eb4-361609541a10";
 
-const char *CLEAR_CALIB_UUID =          "cd3fb5aa-c679-4d3e-9eb4-c12dcc1b4ccb";
+const char *CLEAR_CALIB_UUID =   "cd3fb5aa-c679-4d3e-9eb4-c12dcc1b4ccb";
+const char *RESET_UUID =         "cd3fb5aa-c679-4d3e-9eb4-23587c136d2a";
+
 
 BLEServer *pServer(nullptr);
 BLEService *pService(nullptr);
@@ -385,7 +387,9 @@ MyFloatDataCharacteristic *pPitchOffsetChar(nullptr);
 MyByteDataCharacteristic *pAxisConfigChar(nullptr);
 MyByteDataCharacteristic *pAxisSignChar(nullptr);
 
-MyResetCharacteristic *pClearCalibChar(nullptr);
+MyActionCharacteristic *pClearCalibChar(nullptr);
+MyActionCharacteristic *pResetChar(nullptr);
+
 
 MyBLEServerCallbacks serverCallbacks;
 
@@ -523,8 +527,8 @@ void setup() {
 
    // Set device information
   NMEA2000.SetDeviceInformation(id,   // Unique number. Use e.g. Serial number.
-                                140,  // Device function=Analog to NMEA 2000 Gateway. See codes on http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
-                                25,   // Device class=Inter/Intranetwork Device. See codes on  http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
+                                140,  // Device function=Ownship Attitude. See codes on http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
+                                60,   // Device class=Navigation. See codes on  http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
                                 2006  // Just choosen free from code list on http://www.nmea.org/Assets/20121020%20nmea%202000%20registration%20list.pdf
                                 );
 
@@ -562,7 +566,9 @@ void setup() {
   pCalibChar = new MyStringCharacteristic(pService, CALIBRATION_UUID, "calibration");
 
   
-  pClearCalibChar = new MyResetCharacteristic(pService, BLEUUID(CLEAR_CALIB_UUID), clearCalib, "clear calibration");
+  pClearCalibChar = new MyActionCharacteristic(pService, BLEUUID(CLEAR_CALIB_UUID), clearCalib, "clear calibration");
+  pResetChar = new MyActionCharacteristic(pService, BLEUUID(RESET_UUID), resetSystem, "reset system");
+
  
   pAxisConfigChar = new MyByteDataCharacteristic(pService, AXIS_CONFIG_UUID, "axis config", 
                              []{ return (uint8_t)persistentData.axis_config; },
