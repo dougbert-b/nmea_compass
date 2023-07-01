@@ -75,9 +75,10 @@ public:
   int node_address;  // For NMEA2K, default is 34
   float roll_offset;
   float pitch_offset;
+  bool reload_cal_if_lost;
 
   void begin() {
-    prefs.begin("compass_prefs"); 
+    prefs.begin("compass_prefs");  
     prefs.getBytes("compass", this, sizeof(*this));
   }
 
@@ -98,6 +99,7 @@ public:
 
     roll_offset = 0.0;
     pitch_offset = 0.0;
+    reload_cal_if_lost = true;
   }
 
 
@@ -370,6 +372,7 @@ const char *PITCH_OFFSET_UUID =  "cd3fb5aa-c679-4d3e-9eb4-361609541a10";
 
 const char *CLEAR_CALIB_UUID =   "cd3fb5aa-c679-4d3e-9eb4-c12dcc1b4ccb";
 const char *RESET_UUID =         "cd3fb5aa-c679-4d3e-9eb4-23587c136d2a";
+const char *RELOAD_CAL_UUID =    "cd3fb5aa-c679-4d3e-9eb4-0251d9c95b48";
 
 
 BLEServer *pServer(nullptr);
@@ -386,6 +389,8 @@ MyFloatDataCharacteristic *pPitchOffsetChar(nullptr);
 
 MyByteDataCharacteristic *pAxisConfigChar(nullptr);
 MyByteDataCharacteristic *pAxisSignChar(nullptr);
+MyByteDataCharacteristic *pReloadCalChar(nullptr);
+
 
 MyActionCharacteristic *pClearCalibChar(nullptr);
 MyActionCharacteristic *pResetChar(nullptr);
@@ -553,7 +558,7 @@ void setup() {
   
   pDeviceInfoService = new DeviceInformationService(pServer);
 
-  pService = pServer->createService(BLEUUID(SERVICE_UUID), 32 /*numHandles*/);
+  pService = pServer->createService(BLEUUID(SERVICE_UUID), 48 /*numHandles*/);
 
   
  
@@ -586,12 +591,15 @@ void setup() {
                              [](float val){ persistentData.roll_offset = val; persistentData.commit();}
                           );
 
-pPitchOffsetChar = new MyFloatDataCharacteristic(pService, PITCH_OFFSET_UUID, "pitch offset", 
+  pPitchOffsetChar = new MyFloatDataCharacteristic(pService, PITCH_OFFSET_UUID, "pitch offset", 
                              []{ return persistentData.pitch_offset; },
                              [](float val){ persistentData.pitch_offset = val; persistentData.commit();}
                           );
 
-
+  pReloadCalChar = new MyByteDataCharacteristic(pService, RELOAD_CAL_UUID, "reload cal if lost", 
+                             []{ return (uint8_t)persistentData.reload_cal_if_lost; },
+                             [](uint8_t val){ persistentData.reload_cal_if_lost = val; persistentData.commit();}
+                          );
 
 
   pService->dump();
@@ -719,6 +727,11 @@ void loop() {
       heading = DegToRad(rawHeading);
     } else {
       heading = NMEA0183DoubleNA;  // Send a blank value  (N2KDoubleNA is the same value)
+
+      if (found_calib && persistentData.reload_cal_if_lost) {
+        Serial.println("\nCalibration lost, restarting to reload calibration.");
+        resetSystem();
+      }
     }
 
     tNMEA0183Msg NMEA0183Msg;
