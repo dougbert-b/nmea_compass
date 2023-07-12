@@ -58,7 +58,7 @@ uint8_t accel_calib;
 uint8_t mag_calib;
 uint8_t fully_calib;
 
-bool found_calib = false;
+bool loaded_calib = false;
 
 
 // Persistent Data
@@ -75,6 +75,7 @@ public:
   int node_address;  // For NMEA2K, default is 34
   float roll_offset;
   float pitch_offset;
+  float temperature_offset;
   bool reload_cal_if_lost;
 
   void begin() {
@@ -99,6 +100,7 @@ public:
 
     roll_offset = 0.0;
     pitch_offset = 0.0;
+    temperature_offset = 0.0;
     reload_cal_if_lost = true;
   }
 
@@ -224,7 +226,7 @@ MyFloatDataCharacteristic::onWrite(BLECharacteristic *characteristic)
 
 
 
-
+// This is useable for any floating-point value...
 class MyAngleCharacteristic : public BLECharacteristic {
 public:
   MyAngleCharacteristic(BLEService *pService, const char *uuid, const char *descr) : 
@@ -362,6 +364,8 @@ const char *SERVICE_UUID  =      "ac73740d-faf4-4c5c-a109-8abaaff98abc";
 const char *HEADING_UUID  =      "cd3fb5aa-c679-4d3e-9eb4-97912c27b298";
 const char *ROLL_UUID  =         "cd3fb5aa-c679-4d3e-9eb4-3990fa52213b";
 const char *PITCH_UUID  =        "cd3fb5aa-c679-4d3e-9eb4-f765e94d054b";
+const char *TEMPERATURE_UUID  =  "cd3fb5aa-c679-4d3e-9eb4-bbe77c760f16";
+
 const char *CALIBRATION_UUID =   "cd3fb5aa-c679-4d3e-9eb4-8ce31b0538c6";
 
 const char *AXIS_CONFIG_UUID =   "cd3fb5aa-c679-4d3e-9eb4-85b6bfc15110";
@@ -369,6 +373,7 @@ const char *AXIS_SIGN_UUID =     "cd3fb5aa-c679-4d3e-9eb4-7ae7aed6bf55";
 
 const char *ROLL_OFFSET_UUID =   "cd3fb5aa-c679-4d3e-9eb4-a0b507178d86";
 const char *PITCH_OFFSET_UUID =  "cd3fb5aa-c679-4d3e-9eb4-361609541a10";
+const char *TEMPERATURE_OFFSET_UUID =  "cd3fb5aa-c679-4d3e-9eb4-929b992324e2";
 
 const char *CLEAR_CALIB_UUID =   "cd3fb5aa-c679-4d3e-9eb4-c12dcc1b4ccb";
 const char *RESET_UUID =         "cd3fb5aa-c679-4d3e-9eb4-23587c136d2a";
@@ -382,10 +387,12 @@ DeviceInformationService *pDeviceInfoService(nullptr);
 MyAngleCharacteristic *pHeadingChar(nullptr);
 MyAngleCharacteristic *pRollChar(nullptr);
 MyAngleCharacteristic *pPitchChar(nullptr);
+MyAngleCharacteristic *pTemperatureChar(nullptr);
 MyStringCharacteristic *pCalibChar(nullptr);
 
 MyFloatDataCharacteristic *pRollOffsetChar(nullptr);
 MyFloatDataCharacteristic *pPitchOffsetChar(nullptr);
+MyFloatDataCharacteristic *pTemperatureOffsetChar(nullptr);
 
 MyByteDataCharacteristic *pAxisConfigChar(nullptr);
 MyByteDataCharacteristic *pAxisSignChar(nullptr);
@@ -429,13 +436,42 @@ void print_wakeup_reason(){
 
 
 bool goodCalibration() {
-    return mag_calib > 0 && (system_calib + mag_calib) >= 2;
+    return mag_calib > 0;
 }
 
 
 
 // Set the information for other bus devices, which N2K messages we support: Heading and Attitude
 const unsigned long transmitMessages[] PROGMEM = {127250L, 127571L, 0};
+
+unsigned long loadCalibrationTime = 0;
+
+bool loadCalibration() {
+
+  sensor_t sensor;
+  bno.getSensor(&sensor);
+
+  if (persistentData.sensor_id != sensor.sensor_id)
+  {
+    Serial.println("\nNo Calibration Data for this sensor exists in EEPROM");
+    Serial.printf("\nSensor ID: %lx  Stored ID: %lx\n", sensor.sensor_id, persistentData.sensor_id);
+
+    loaded_calib = false;
+    return false;
+  }
+  
+  Serial.println("\nFound Calibration for this sensor in EEPROM.");
+
+  displaySensorOffsets(persistentData.calibration_data);
+  Serial.println("\n\nRestoring Calibration data to the BNO055...");
+  bno.setSensorOffsets(persistentData.calibration_data);
+  Serial.println("\n\nCalibration data loaded into BNO055");
+
+  loadCalibrationTime = millis();
+  loaded_calib = true;
+  return true;
+
+}
 
 
 
@@ -450,7 +486,7 @@ void setup() {
 
 
   // This will use the default I2C Wire pins.
-  if (!bno.begin()) {
+  if (!bno.begin(OPERATION_MODE_NDOF)) {
     Serial.println("No BNO055 detected");
     while (1);
   }
@@ -476,28 +512,8 @@ void setup() {
   *  This isn't foolproof, but it's better than nothing.
   */
 
-  sensor_t sensor;
-  bno.getSensor(&sensor);
-
-  if (persistentData.sensor_id != sensor.sensor_id)
-  {
-      Serial.println("\nNo Calibration Data for this sensor exists in EEPROM");
-      Serial.printf("\nSensor ID: %lx  Stored ID: %lx\n", sensor.sensor_id, persistentData.sensor_id);
-
-      delay(500);
-  }
-  else
-  {
-      Serial.println("\nFound Calibration for this sensor in EEPROM.");
-
-      displaySensorOffsets(persistentData.calibration_data);
-      Serial.println("\n\nRestoring Calibration data to the BNO055...");
-      bno.setSensorOffsets(persistentData.calibration_data);
-
-      Serial.println("\n\nCalibration data loaded into BNO055");
-      found_calib = true;
-  }
-
+  loadCalibration();
+  
   delay(1000);
 
   /* Crystal must be configured AFTER loading calibration data into BNO055. */
@@ -567,6 +583,7 @@ void setup() {
   pHeadingChar = new MyAngleCharacteristic(pService, HEADING_UUID, "heading value");
   pRollChar = new MyAngleCharacteristic(pService, ROLL_UUID, "roll value");
   pPitchChar = new MyAngleCharacteristic(pService, PITCH_UUID, "pitch value");
+  pTemperatureChar = new MyAngleCharacteristic(pService, TEMPERATURE_UUID, "temperature value");
 
   pCalibChar = new MyStringCharacteristic(pService, CALIBRATION_UUID, "calibration");
 
@@ -594,6 +611,11 @@ void setup() {
   pPitchOffsetChar = new MyFloatDataCharacteristic(pService, PITCH_OFFSET_UUID, "pitch offset", 
                              []{ return persistentData.pitch_offset; },
                              [](float val){ persistentData.pitch_offset = val; persistentData.commit();}
+                          );
+
+  pTemperatureOffsetChar = new MyFloatDataCharacteristic(pService, TEMPERATURE_OFFSET_UUID, "temperature offset", 
+                             []{ return persistentData.temperature_offset; },
+                             [](float val){ persistentData.temperature_offset = val; persistentData.commit();}
                           );
 
   pReloadCalChar = new MyByteDataCharacteristic(pService, RELOAD_CAL_UUID, "reload cal if lost", 
@@ -728,9 +750,13 @@ void loop() {
     } else {
       heading = NMEA0183DoubleNA;  // Send a blank value  (N2KDoubleNA is the same value)
 
-      if (found_calib && persistentData.reload_cal_if_lost) {
-        Serial.println("\nCalibration lost, restarting to reload calibration.");
-        resetSystem();
+      if (loaded_calib && persistentData.reload_cal_if_lost && (curTime > loadCalibrationTime + 60000)) {
+        Serial.println("\nCalibration lost, reloading saved calibration.");
+        //resetSystem();
+        loadCalibration();
+        delay(1000);
+        /* Crystal must be configured AFTER loading calibration data into BNO055. */
+        bno.setExtCrystalUse(true);
       }
     }
 
@@ -748,6 +774,10 @@ void loop() {
     SetN2kAttitude(N2kMsg, 0, 0.0, DegToRad(rawPitch + persistentData.pitch_offset), DegToRad(rawRoll + persistentData.roll_offset));
     NMEA2000.SendMsg(N2kMsg);
 
+    double rawTemperature = bno.getTemp();
+    SetN2kTemperatureExt(N2kMsg, 0, 1 /*TempInstance*/, N2kts_InsideTemperature, CToKelvin(rawTemperature + persistentData.temperature_offset));
+    NMEA2000.SendMsg(N2kMsg);
+
     // Check if SourceAddress has changed (due to address conflict on bus)
 
     if (NMEA2000.ReadResetAddressChanged()) {
@@ -760,9 +790,11 @@ void loop() {
     pHeadingChar->setVal(rawHeading, haveConnection);
     pRollChar->setVal(rawRoll, haveConnection);
     pPitchChar->setVal(rawPitch, haveConnection);
-  
+
+    pTemperatureChar->setVal(rawTemperature, haveConnection);
+
         
-    if (!found_calib && bno.isFullyCalibrated()) {
+    if (!loaded_calib && bno.isFullyCalibrated()) {
 
       Serial.println("\nFully calibrated!");
       Serial.println("--------------------------------");
@@ -780,7 +812,7 @@ void loop() {
       
       persistentData.commit();
       Serial.println("Data stored to EEPROM.");
-      found_calib = true;
+      loaded_calib = true;
 
       Serial.println("\n--------------------------------\n");
     }
