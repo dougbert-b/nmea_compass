@@ -436,7 +436,7 @@ void print_wakeup_reason(){
 
 
 bool goodCalibration() {
-    return mag_calib > 0;
+    return mag_calib > 1;
 }
 
 
@@ -486,7 +486,7 @@ void setup() {
 
 
   // This will use the default I2C Wire pins.
-  if (!bno.begin(OPERATION_MODE_NDOF)) {
+  if (!bno.begin(OPERATION_MODE_NDOF_FMC_OFF)) {
     Serial.println("No BNO055 detected");
     while (1);
   }
