@@ -92,9 +92,15 @@ public:
     //axis_config = Adafruit_BNO055::REMAP_CONFIG_P1;
     //axis_sign = Adafruit_BNO055::REMAP_SIGN_P1;
 
-      // X = -Y, Y = Z, Z = -X  For mounting on forward side of vertical bulkhead, cable on right.
+    // Old arrangement:
+    // X = -Y, Y = Z, Z = -X  For mounting on forward side of vertical bulkhead, cable on right.
+    // axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09;
+    // axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05;
+
+    // New 11/2024 arrangement:
+    // X = Y, Y = -Z, Z = -X  For mounting on rear side of vertical bulkhead, cable on left.
     axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09;
-    axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05;
+    axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x03;
 
     node_address = 34;
 
