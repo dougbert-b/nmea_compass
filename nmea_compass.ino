@@ -13,8 +13,9 @@
 #define ESP32_CAN_RX_PIN GPIO_NUM_34   // Set CAN RX port  // BTW, 4 is unavailable on Heltec
 
 #include <Wire.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BNO055.h>
+//#include <Adafruit_Sensor.h>
+//#include <Adafruit_BNO055.h>
+#include "Adafruit_BNO08x.h"
 
 #include <NMEA0183.h>
 #include <NMEA0183Msg.h>
@@ -46,8 +47,9 @@ double DEG_2_RAD = 0.01745329251; //trig functions require radians, BNO055 outpu
 
 // Check I2C device address and correct line below (by default address is 0x29 or 0x28)
 //                                   id, address
-Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
+//Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
 
+Adafruit_BNO08x bno = Adafruit_BNO08x(-1);
 
 tNMEA0183* NMEA0183 = nullptr;
 
