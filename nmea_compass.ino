@@ -26,6 +26,8 @@
 #include <HardwareSerial.h>
 #include <Preferences.h>
 
+#include "esp_mac.h"
+
 /*
     BLE stuff based on Neil Kolban example for IDF: https://github.com/nkolban/esp32-snippets/blob/master/cpp_utils/tests/BLE%20Tests/SampleServer.cpp
     Ported to Arduino ESP32 by Evandro Copercini
@@ -163,7 +165,7 @@ public:
     _getter(getter),
     _setter(setter)
   {
-     setValue(formatVal(_getter()));  // setValue() is in base class BLECharacteristic
+     setValue(formatVal(_getter()).c_str());  // setValue() is in base class BLECharacteristic
 
     // Do this after setValue(), to avoid weird loops.
     setCallbacks(this);  // In base class BLECharacteristic
@@ -201,7 +203,7 @@ MyByteDataCharacteristic::onWrite(BLECharacteristic *characteristic)
     uint8_t val;
     sscanf((char*)getData(), "%x", &val);  // Convert BLE payload from ascii hex string to char.
     if (_setter) _setter(val);
-    setValue(formatVal(_getter()));
+    setValue(formatVal(_getter()).c_str());
   } else {
     log_e("Improper structure of byteDataCharacteristic!");
   }
@@ -223,7 +225,7 @@ MyFloatDataCharacteristic::onWrite(BLECharacteristic *characteristic)
     float val;
     sscanf((char*)getData(), "%f", &val);  // Convert BLE payload from ascii string to float.
     if (_setter) _setter(val);
-    setValue(formatVal(_getter()));
+    setValue(formatVal(_getter()).c_str());
   } else {
     log_e("Improper structure of floatDataCharacteristic!");
   }
@@ -244,7 +246,7 @@ public:
     pService->addCharacteristic(this);
   }
 
-  void setVal(float val, bool noti=false) { setValue(std::to_string(val)); if (noti) notify(); }
+  void setVal(float val, bool noti=false) { setValue(std::to_string(val).c_str()); if (noti) notify(); }
 };
 
 
@@ -259,7 +261,7 @@ public:
     pService->addCharacteristic(this);
   }
 
-  void setVal(std::string val, bool noti=false) { setValue(val); if (noti) notify(); }
+  void setVal(std::string val, bool noti=false) { setValue(val.c_str()); if (noti) notify(); }
 };
 
 
