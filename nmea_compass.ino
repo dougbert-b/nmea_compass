@@ -44,7 +44,7 @@ constexpr bool verbose_bno = false;
 
 
 
-double DEG_2_RAD = 0.01745329251; //trig functions require radians, BNO055 outputs degrees
+double DEG_2_RAD = 0.01745329251; //BNO055 outputs radians, and NMEA2000 takes radians.
 
 
 
@@ -85,17 +85,17 @@ public:
 
     data_valid = true;
 
-    //reorientationIdx = 0;
+    //reorientationIdx = 0x00;
 
     // Old arrangement:
-    // X = -Y, Y = Z, Z = -X  For mounting on forward side of vertical bulkhead, cable on right.
-    // Z points forward, X points up (or down?)
-    reorientationIdx = 8;
+    // For mounting on forward side of vertical bulkhead, cable runs to port.
+    // Z points forward, X points up
+    // reorientationIdx = 0x08;
     
     // New 11/2024 arrangement:
-    // X = Y, Y = -Z, Z = -X  For mounting on rear side of vertical bulkhead, cable on left.
-    // Z points forward, X points up (or down?)
-    reorientationIdx = 13;
+    // For mounting on rear side of vertical bulkhead, cable runs to port.
+    // Z points aft, X points down
+    reorientationIdx = 0x0e;
 
     node_address = 34;
 
@@ -574,9 +574,6 @@ void setup() {
   
   
   delay(1000);
-
-  /* Crystal must be configured AFTER loading calibration data into BNO055. */
-  //bno.setExtCrystalUse(true);
 
   // For NMEA0183 output on ESP32
   Serial2.begin(4800, SERIAL_8N1, 16 /*Rx pin*/, 17 /*Tx pin*/, true /*invert*/);
