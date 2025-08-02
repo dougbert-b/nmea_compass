@@ -1,3 +1,4 @@
+
    /* Hardware pinout for ESP32 DEVKIT board
 
    Magnetometer:
@@ -13,9 +14,7 @@
 #define ESP32_CAN_RX_PIN GPIO_NUM_34   // Set CAN RX port  // BTW, 4 is unavailable on Heltec
 
 #include <Wire.h>
-//#include <Adafruit_Sensor.h>
-//#include <Adafruit_BNO055.h>
-#include "Adafruit_BNO08x.h"
+#include "SparkFun_BNO08x_Arduino_Library.h" 
 
 #include <NMEA0183.h>
 #include <NMEA0183Msg.h>
@@ -47,22 +46,20 @@ constexpr bool verbose_bno = false;
 
 double DEG_2_RAD = 0.01745329251; //trig functions require radians, BNO055 outputs degrees
 
-// Check I2C device address and correct line below (by default address is 0x29 or 0x28)
-//                                   id, address
-//Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
 
-Adafruit_BNO08x bno = Adafruit_BNO08x(-1);
+
+BNO08x myIMU;
+// For the most reliable interaction with the SHTP bus, we need
+// to use hardware reset control, and to monitor the H_INT pin.
+// The H_INT pin will go low when its okay to talk on the SHTP bus.
+// Note, these can be other GPIO if you like.
+// Define as -1 to disable these features.
+#define BNO08X_INT  -1
+#define BNO08X_RST  -1
+#define BNO08X_ADDR 0x4A // Default for Adafruit BNO085 board - SparkFun BNO08x Breakout (Qwiic) defaults to 0x4B
+
 
 tNMEA0183* NMEA0183 = nullptr;
-
-sensors_event_t orientationData;
-uint8_t system_calib;
-uint8_t gyro_calib;
-uint8_t accel_calib;
-uint8_t mag_calib;
-uint8_t fully_calib;
-
-bool loaded_calib = false;
 
 
 // Persistent Data
@@ -71,16 +68,12 @@ Preferences prefs;
 
 class PersistentData {
 public:
-  long sensor_id;  // If non-zero and equal to actual sensor ID, calibration_data is valid
-  adafruit_bno055_offsets_t calibration_data;
   bool data_valid;
-  Adafruit_BNO055::adafruit_bno055_axis_remap_config_t axis_config;
-  Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t axis_sign;
+  int reorientationIdx;
   int node_address;  // For NMEA2K, default is 34
   float roll_offset;
   float pitch_offset;
   float temperature_offset;
-  bool reload_cal_if_lost;
 
   void begin() {
     prefs.begin("compass_prefs");  
@@ -90,28 +83,25 @@ public:
   void init() {
     // Call commit() after this!
 
-    sensor_id = 0;  // Mark calibration_data as invalid
     data_valid = true;
 
-    //axis_config = Adafruit_BNO055::REMAP_CONFIG_P1;
-    //axis_sign = Adafruit_BNO055::REMAP_SIGN_P1;
+    //reorientationIdx = 0;
 
     // Old arrangement:
     // X = -Y, Y = Z, Z = -X  For mounting on forward side of vertical bulkhead, cable on right.
-    // axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09;
-    // axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x05;
-
+    // Z points forward, X points up (or down?)
+    reorientationIdx = 8;
+    
     // New 11/2024 arrangement:
     // X = Y, Y = -Z, Z = -X  For mounting on rear side of vertical bulkhead, cable on left.
-    axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)0x09;
-    axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)0x03;
+    // Z points forward, X points up (or down?)
+    reorientationIdx = 13;
 
     node_address = 34;
 
     roll_offset = 0.0;
     pitch_offset = 0.0;
     temperature_offset = 0.0;
-    reload_cal_if_lost = true;
   }
 
 
@@ -369,7 +359,7 @@ DeviceInformationService::DeviceInformationService(BLEServer *server)
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
 
-const char *SERVICE_UUID  =      "ac73740d-faf4-4c5c-a109-8abaaff98abc";
+const char *SERVICE_UUID  =      "4bd81659-41d3-46d2-9e84-bd7e9cae18ef";
 
 const char *HEADING_UUID  =      "cd3fb5aa-c679-4d3e-9eb4-97912c27b298";
 const char *ROLL_UUID  =         "cd3fb5aa-c679-4d3e-9eb4-3990fa52213b";
@@ -378,16 +368,15 @@ const char *TEMPERATURE_UUID  =  "cd3fb5aa-c679-4d3e-9eb4-bbe77c760f16";
 
 const char *CALIBRATION_UUID =   "cd3fb5aa-c679-4d3e-9eb4-8ce31b0538c6";
 
-const char *AXIS_CONFIG_UUID =   "cd3fb5aa-c679-4d3e-9eb4-85b6bfc15110";
-const char *AXIS_SIGN_UUID =     "cd3fb5aa-c679-4d3e-9eb4-7ae7aed6bf55";
+const char *REORIENTATION_UUID = "cd3fb5aa-c679-4d3e-9eb4-85b6bfc15120";
 
 const char *ROLL_OFFSET_UUID =   "cd3fb5aa-c679-4d3e-9eb4-a0b507178d86";
 const char *PITCH_OFFSET_UUID =  "cd3fb5aa-c679-4d3e-9eb4-361609541a10";
 const char *TEMPERATURE_OFFSET_UUID =  "cd3fb5aa-c679-4d3e-9eb4-929b992324e2";
 
+const char *SAVE_CALIB_UUID =   "cd3fb5aa-c679-4d3e-9eb4-4181053fa198";
 const char *CLEAR_CALIB_UUID =   "cd3fb5aa-c679-4d3e-9eb4-c12dcc1b4ccb";
 const char *RESET_UUID =         "cd3fb5aa-c679-4d3e-9eb4-23587c136d2a";
-const char *RELOAD_CAL_UUID =    "cd3fb5aa-c679-4d3e-9eb4-0251d9c95b48";
 
 
 BLEServer *pServer(nullptr);
@@ -398,17 +387,15 @@ MyAngleCharacteristic *pHeadingChar(nullptr);
 MyAngleCharacteristic *pRollChar(nullptr);
 MyAngleCharacteristic *pPitchChar(nullptr);
 MyAngleCharacteristic *pTemperatureChar(nullptr);
-MyStringCharacteristic *pCalibChar(nullptr);
+MyAngleCharacteristic *pCalibChar(nullptr);
 
 MyFloatDataCharacteristic *pRollOffsetChar(nullptr);
 MyFloatDataCharacteristic *pPitchOffsetChar(nullptr);
 MyFloatDataCharacteristic *pTemperatureOffsetChar(nullptr);
 
-MyByteDataCharacteristic *pAxisConfigChar(nullptr);
-MyByteDataCharacteristic *pAxisSignChar(nullptr);
-MyByteDataCharacteristic *pReloadCalChar(nullptr);
+MyByteDataCharacteristic *pReorientationChar(nullptr);
 
-
+MyActionCharacteristic *pSaveCalibChar(nullptr);
 MyActionCharacteristic *pClearCalibChar(nullptr);
 MyActionCharacteristic *pResetChar(nullptr);
 
@@ -428,6 +415,23 @@ void resetSystem()
 
   
 
+void saveCalib()
+{
+  // The calibration is stored in the BNO085 chip's flash, not in the ESP32 flash.
+  sh2_saveDcdNow();
+  Serial.println("Current calibrarion stored.");
+  resetSystem();
+}
+
+
+void clearCalib()
+{
+  // The calibration is stored in the BNO085 chip's flash, not in the ESP32 flash.
+  sh2_clearDcdAndReset();
+  Serial.println("Stored calibration invalidated.");
+  resetSystem();
+}
+
 void print_wakeup_reason(){
   esp_sleep_wakeup_cause_t wakeup_reason;
   wakeup_reason = esp_sleep_get_wakeup_cause();
@@ -444,44 +448,89 @@ void print_wakeup_reason(){
 }
 
 
-
-bool goodCalibration() {
-    return mag_calib > 1;
-}
-
-
-
 // Set the information for other bus devices, which N2K messages we support: Heading and Attitude
 const unsigned long transmitMessages[] PROGMEM = {127250L, 127571L, 0};
 
-unsigned long loadCalibrationTime = 0;
 
-bool loadCalibration() {
 
-  sensor_t sensor;
-  bno.getSensor(&sensor);
+int setReorientation(double w, double x, double y, double z) {
+    
+  sh2_Quaternion_t q;
+  q.x = x;
+  q.y = y;
+  q.z = z;
+  q.w = w;
+  Serial.printf("Orientation: %f  %f  %f  %f\n", w, x, y, z);
 
-  if (persistentData.sensor_id != sensor.sensor_id)
-  {
-    Serial.println("\nNo Calibration Data for this sensor exists in EEPROM");
-    Serial.printf("\nSensor ID: %lx  Stored ID: %lx\n", sensor.sensor_id, persistentData.sensor_id);
+  return sh2_setReorientation(&q);
+}
 
-    loaded_calib = false;
-    return false;
+constexpr double S22 = sqrt(2)/2;
+
+
+double orientationQuaternions[24][4] = {
+
+  // Qw    Qx    Qy    Qz        Fwd   Up
+  {   1,    0,    0,    0},  //    X    Z   (default)  
+  { S22,    0,    0,  S22},  //   -Y    Z   Y points back, Z points up
+  {   0,    0,    0,    1},  //   -X    Z
+  { S22,    0,    0, -S22},  //    Y    Z
+
+  {   0,    0,   -1,    0},  //    X   -Z   X points fwd, Z points down
+  {   0, -S22, -S22,    0},  //    Y   -Z
+  {   0,   -1,    0,    0},  //   -X   -Z
+  {   0, -S22,  S22,    0},  //   -Y   -Z
+
+  {   0,    0, -S22,  S22},  //    Z    X  Z points fwd, X points up
+  { 0.5, -0.5, -0.5,  0.5},  //    Z    Y
+  { S22, -S22,    0,    0},  //    Z   -X
+  { 0.5, -0.5,  0.5, -0.5},  //    Z   -Y
+
+  {-S22, -S22,    0,    0},  //   -Z    X  
+  {-0.5, -0.5, -0.5, -0.5},  //   -Z   -Y   
+  {   0,    0, -S22, -S22},  //   -Z   -X
+  { 0.5,  0.5, -0.5, -0.5},  //   -Z    Y
+
+  {-0.5, -0.5, -0.5,  0.5},  //    Y    X  
+  {   0, -S22,    0,  S22},  //   -X    Y
+  { 0.5, -0.5,  0.5,  0.5},  //   -Y   -X
+  {-S22,    0, -S22,    0},  //    X   -Y
+
+  { 0.5,  0.5, -0.5,  0.5},  //   -Y    X
+  {   0, -S22,    0, -S22},  //   -X   -Y
+  { 0.5, -0.5, -0.5, -0.5},  //    Y   -X
+  { S22,    0, -S22,    0}   //    X    Y
+};
+
+
+int setReorientation(int idx) {
+  if (idx < 0 || idx > 23) {
+    Serial.printf("Bad reorientation idx %d!\n", idx);
+    return setReorientation(0);
   }
+
+  double *q = &(orientationQuaternions[idx][0]);
+  return setReorientation(q[0], q[1], q[2], q[3]);
+}
+
+
+// Here is where you define the sensor outputs you want to receive
+void configSensor(void) {
   
-  Serial.println("\nFound Calibration for this sensor in EEPROM.");
+  int ret = setReorientation(persistentData.reorientationIdx);
+  Serial.printf("setReorientation returns %x\n", ret);
 
-  displaySensorOffsets(persistentData.calibration_data);
-  Serial.println("\n\nRestoring Calibration data to the BNO055...");
-  bno.setSensorOffsets(persistentData.calibration_data);
-  Serial.println("\n\nCalibration data loaded into BNO055");
-
-  loadCalibrationTime = millis();
-  loaded_calib = true;
-  return true;
+  Serial.println("Setting desired reports");
+  if (myIMU.enableGeomagneticRotationVector() == true) {
+  //if (myIMU.enableRotationVector(60) == true) {
+    Serial.println(F("Geomagnetic Rotation vector enabled"));
+    Serial.println(F("Output in form roll, pitch, yaw"));
+  } else {
+    Serial.println("Could not enable geomagnetic rotation vector");
+  }
 
 }
+
 
 
 
@@ -496,11 +545,17 @@ void setup() {
 
 
   // This will use the default I2C Wire pins.
-  if (!bno.begin(OPERATION_MODE_NDOF_FMC_OFF)) {
-    Serial.println("No BNO055 detected");
-    while (1);
-  }
+  Wire.begin();
 
+  if (myIMU.begin(BNO08X_ADDR, Wire, BNO08X_INT, BNO08X_RST) == false) {
+    Serial.println("BNO08x not detected at specified I2C address. Freezing...");
+    while (1)
+      ;
+
+  }
+  Serial.println("BNO08x found!");
+
+  
   // Note: The ESP32 EEPROM library is used differently than the official Arduino version.
   persistentData.begin();
 
@@ -512,22 +567,16 @@ void setup() {
     Serial.println("Initialized persistent data");
   }
 
-  bno.setAxisRemap(persistentData.axis_config);
-  bno.setAxisSign(persistentData.axis_sign);
-  Serial.printf("Set sensor axis data to 0x%x  0x%x\n", persistentData.axis_config, persistentData.axis_sign);
   
-
-  /*
-  *  Read the sensor's unique ID in the EEPROM.
-  *  This isn't foolproof, but it's better than nothing.
-  */
-
-  loadCalibration();
+  Serial.printf("Set sensor reorientation to 0x%x\n", persistentData.reorientationIdx);
+  
+  configSensor();
+  
   
   delay(1000);
 
   /* Crystal must be configured AFTER loading calibration data into BNO055. */
-  bno.setExtCrystalUse(true);
+  //bno.setExtCrystalUse(true);
 
   // For NMEA0183 output on ESP32
   Serial2.begin(4800, SERIAL_8N1, 16 /*Rx pin*/, 17 /*Tx pin*/, true /*invert*/);
@@ -595,23 +644,18 @@ void setup() {
   pPitchChar = new MyAngleCharacteristic(pService, PITCH_UUID, "pitch value");
   pTemperatureChar = new MyAngleCharacteristic(pService, TEMPERATURE_UUID, "temperature value");
 
-  pCalibChar = new MyStringCharacteristic(pService, CALIBRATION_UUID, "calibration");
+  pCalibChar = new MyAngleCharacteristic(pService, CALIBRATION_UUID, "calibration accuracy");
 
-  
+  pSaveCalibChar = new MyActionCharacteristic(pService, BLEUUID(SAVE_CALIB_UUID), saveCalib, "save calibration");
   pClearCalibChar = new MyActionCharacteristic(pService, BLEUUID(CLEAR_CALIB_UUID), clearCalib, "clear calibration");
   pResetChar = new MyActionCharacteristic(pService, BLEUUID(RESET_UUID), resetSystem, "reset system");
 
  
-  pAxisConfigChar = new MyByteDataCharacteristic(pService, AXIS_CONFIG_UUID, "axis config", 
-                             []{ return (uint8_t)persistentData.axis_config; },
-                             [](uint8_t val){ persistentData.axis_config = (Adafruit_BNO055::adafruit_bno055_axis_remap_config_t)val; persistentData.commit();}
+  pReorientationChar = new MyByteDataCharacteristic(pService, REORIENTATION_UUID, "reorientation", 
+                             []{ return (uint8_t)persistentData.reorientationIdx; },
+                             [](uint8_t val){ persistentData.reorientationIdx = val; persistentData.commit();}
                           );
 
-
-  pAxisSignChar = new MyByteDataCharacteristic(pService, AXIS_SIGN_UUID, "axis sign", 
-                             []{ return (uint8_t)persistentData.axis_sign; },
-                             [](uint8_t val){ persistentData.axis_sign = (Adafruit_BNO055::adafruit_bno055_axis_remap_sign_t)val; persistentData.commit();}
-                          );
 
   pRollOffsetChar = new MyFloatDataCharacteristic(pService, ROLL_OFFSET_UUID, "roll offset", 
                              []{ return persistentData.roll_offset; },
@@ -628,12 +672,7 @@ void setup() {
                              [](float val){ persistentData.temperature_offset = val; persistentData.commit();}
                           );
 
-  pReloadCalChar = new MyByteDataCharacteristic(pService, RELOAD_CAL_UUID, "reload cal if lost", 
-                             []{ return (uint8_t)persistentData.reload_cal_if_lost; },
-                             [](uint8_t val){ persistentData.reload_cal_if_lost = val; persistentData.commit();}
-                          );
-
-
+  
   pService->dump();
 
   pService->start();
@@ -682,229 +721,103 @@ void loop() {
     }
   }
 
-  unsigned long curTime = millis();
-  if (curTime > nextUpdate) {
-    nextUpdate = curTime + 500;
+  if (myIMU.wasReset()) {
+    Serial.print("sensor was reset ");
+    configSensor();
+  }
+
+  // Try to pull an event off the queue
+  bool haveEvent = myIMU.getSensorEvent();
   
+  // Has a new event come in on the Sensor Hub Bus?
+  // This will almost always be true - probably several events have come in.
+  if (haveEvent) {
+    float rawRoll = (myIMU.getRoll()) * 180.0 / PI; // Convert roll to degrees
+    float rawPitch = -(myIMU.getPitch()) * 180.0 / PI; // Convert pitch to degrees, and negate
+    float rawYaw = (myIMU.getYaw()) * 180.0 / PI; // Convert yaw / heading to degrees
 
-    bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
-    // In degrees
-    float rawHeading = orientationData.orientation.x;
-    float rawRoll = -orientationData.orientation.y;
-    float rawPitch = -orientationData.orientation.z;
-
-    if (verbose_bno) {
-      
-      sensors_event_t magnetometerData;
-      bno.getEvent(&magnetometerData, Adafruit_BNO055::VECTOR_MAGNETOMETER);
-
-      printEvent(&orientationData);
-      printEvent(&magnetometerData);
-
-      uint8_t system_status;
-      uint8_t self_test_result;
-      uint8_t system_error;
-
-      bno.getSystemStatus(&system_status, &self_test_result, &system_error);
-      Serial.print("Status: ");
-      Serial.print(system_status);
-      Serial.print("  Self-test: ");
-      Serial.print(self_test_result);
-      Serial.print("  Error: ");
-      Serial.println(system_error);
-
-    }
-
+    uint8_t accuracy = myIMU.getMagAccuracy();
     
-    bno.getCalibration(&system_calib, &gyro_calib, &accel_calib, &mag_calib);
-    fully_calib = bno.isFullyCalibrated();
+    // is it the correct sensor data we want?
+    bool eventOK = (myIMU.getSensorEventID() == SENSOR_REPORTID_ROTATION_VECTOR ||
+                    myIMU.getSensorEventID() == SENSOR_REPORTID_GEOMAGNETIC_ROTATION_VECTOR);
 
-    std::string cal_str = " S"+std::to_string(system_calib)+"  G"+std::to_string(gyro_calib)+"  A"+
-                          std::to_string(accel_calib)+"  M"+std::to_string(mag_calib)+
-                          "  "+(goodCalibration() ? "OK" : "NG")+"  E"+std::to_string(persistentData.sensor_id);
-    pCalibChar->setVal(cal_str, haveConnection);
-        
-    if (verbose_bno) {
-      Serial.print("Calibration:  System: ");
-      Serial.print(system_calib);
-      Serial.print("  Gyro: ");
-      Serial.print(gyro_calib);
-      Serial.print("  Accel: ");
-      Serial.print(accel_calib);
-      Serial.print("  Mag: ");
-      Serial.print(mag_calib);
 
-      Serial.print("  Fully calibrated: ");
-      Serial.println(fully_calib);
-
-      Serial.print("  NMEA Valid output: ");
-      Serial.println(goodCalibration());
-    }
-
- 
-
-    if (verbose) {
-      Serial.print("Heading: ");
-      Serial.print(rawHeading);
-      Serial.print("  Roll (-y): ");
-      Serial.print(rawRoll);
-      Serial.print("  Pitch (-z): ");
-      Serial.println(rawPitch);
-    }
-
-    double heading;
-    if (goodCalibration()) {
-      digitalWrite(LED_BUILTIN, HIGH);  // Indicate NMEA data transmission
-      // The NMEA0183 API wants heading in radians
-      heading = DegToRad(rawHeading);
-    } else {
-      heading = NMEA0183DoubleNA;  // Send a blank value  (N2KDoubleNA is the same value)
-
-      if (loaded_calib && persistentData.reload_cal_if_lost && (curTime > loadCalibrationTime + 60000)) {
-        Serial.println("\nCalibration lost, reloading saved calibration.");
-        //resetSystem();
-        loadCalibration();
-        delay(1000);
-        /* Crystal must be configured AFTER loading calibration data into BNO055. */
-        bno.setExtCrystalUse(true);
+    unsigned long curTime = millis();
+    if (curTime > nextUpdate) {
+      nextUpdate = curTime + 500;
+    
+      float rawHeading = -rawYaw + 90.0;
+      if (rawHeading < 0.0) {
+        rawHeading += 360.0;
       }
-    }
-
-    tNMEA0183Msg NMEA0183Msg;
-    if ( NMEA0183SetHDM(NMEA0183Msg, heading, "HC") ) {  // HC means magnetic compass
-      NMEA0183->SendMessage(NMEA0183Msg);
-    }
-
-    tN2kMsg N2kMsg;
-    SetN2kMagneticHeading(N2kMsg, 0, heading);
-    //Serial.println("sending CAN");
-    NMEA2000.SendMsg(N2kMsg);
-
-    // We send the actual roll/patch values even if the sensor is not calibrated.
-    SetN2kAttitude(N2kMsg, 0, 0.0, DegToRad(rawPitch + persistentData.pitch_offset), DegToRad(rawRoll + persistentData.roll_offset));
-    NMEA2000.SendMsg(N2kMsg);
-
-    double rawTemperature = bno.getTemp();
-    SetN2kTemperatureExt(N2kMsg, 0, 1 /*TempInstance*/, N2kts_InsideTemperature, CToKelvin(rawTemperature + persistentData.temperature_offset));
-    NMEA2000.SendMsg(N2kMsg);
-
-    // Check if SourceAddress has changed (due to address conflict on bus)
-
-    if (NMEA2000.ReadResetAddressChanged()) {
-      // Save potentially changed Source Address to NVS memory
-      persistentData.node_address = NMEA2000.GetN2kSource();
-      persistentData.commit();
-    }
-
-    // These BLE Characteristics are raw uncorrected sensor values
-    pHeadingChar->setVal(rawHeading, haveConnection);
-    pRollChar->setVal(rawRoll, haveConnection);
-    pPitchChar->setVal(rawPitch, haveConnection);
-
-    pTemperatureChar->setVal(rawTemperature, haveConnection);
-
-        
-    if (!loaded_calib && bno.isFullyCalibrated()) {
-
-      Serial.println("\nFully calibrated!");
-      Serial.println("--------------------------------");
-      Serial.println("Calibration Results: ");
+    
+      pCalibChar->setVal(accuracy, haveConnection);
+          
       
-      bno.getSensorOffsets(persistentData.calibration_data);
+      if (verbose) {
+        Serial.print("Heading: ");
+        Serial.print(rawHeading);
+        Serial.print("  Roll (-y): ");
+        Serial.print(rawRoll);
+        Serial.print("  Pitch (-z): ");
+        Serial.print(rawPitch);
+        Serial.print("  Calibration accuracy: ");
+        Serial.println(accuracy);
+      }
 
-      sensor_t sensor;
-      bno.getSensor(&sensor);
-      persistentData.sensor_id = sensor.sensor_id;
+      double radHeading;
+      if (accuracy > 1) {
+        digitalWrite(LED_BUILTIN, HIGH);  // Indicate NMEA data transmission
+        // The NMEA0183 API wants heading in radians
+        radHeading = DegToRad(rawHeading);
+      } else {
+        radHeading = NMEA0183DoubleNA;  // Send a blank value  (N2KDoubleNA is the same value)
+      }
 
-      displaySensorOffsets(persistentData.calibration_data);
-      Serial.println("\n\nStoring calibration data to EEPROM...");
-      Serial.printf("\nSensor ID: %lx\n", sensor.sensor_id);
-      
-      persistentData.commit();
-      Serial.println("Data stored to EEPROM.");
-      loaded_calib = true;
+      tNMEA0183Msg NMEA0183Msg;
+      if ( NMEA0183SetHDM(NMEA0183Msg, radHeading, "HC") ) {  // HC means magnetic compass
+        NMEA0183->SendMessage(NMEA0183Msg);
+      }
 
-      Serial.println("\n--------------------------------\n");
+      tN2kMsg N2kMsg;
+      SetN2kMagneticHeading(N2kMsg, 0, radHeading);
+      //Serial.println("sending CAN");
+      NMEA2000.SendMsg(N2kMsg);
+
+      // We send the actual roll/patch values even if the sensor is not calibrated.
+      SetN2kAttitude(N2kMsg, 0, 0.0, DegToRad(rawPitch + persistentData.pitch_offset), DegToRad(rawRoll + persistentData.roll_offset));
+      NMEA2000.SendMsg(N2kMsg);
+
+      double rawTemperature = 0.0;   // Available from BNO085?
+      SetN2kTemperatureExt(N2kMsg, 0, 1 /*TempInstance*/, N2kts_InsideTemperature, CToKelvin(rawTemperature + persistentData.temperature_offset));
+      NMEA2000.SendMsg(N2kMsg);
+
+      // Check if SourceAddress has changed (due to address conflict on bus)
+
+      if (NMEA2000.ReadResetAddressChanged()) {
+        // Save potentially changed Source Address to NVS memory
+        persistentData.node_address = NMEA2000.GetN2kSource();
+        persistentData.commit();
+      }
+
+      // These BLE Characteristics are raw uncorrected sensor values
+      pHeadingChar->setVal(rawHeading, haveConnection);
+      pRollChar->setVal(rawRoll, haveConnection);
+      pPitchChar->setVal(rawPitch, haveConnection);
+
+      pTemperatureChar->setVal(rawTemperature, haveConnection);
+
+          
+      delay(5); //allow LED to blink and the cpu to switch to other tasks
+      digitalWrite(LED_BUILTIN, LOW);
+
     }
-
-    delay(5); //allow LED to blink and the cpu to switch to other tasks
-    digitalWrite(LED_BUILTIN, LOW);
-
   }
 
   NMEA2000.ParseMessages();
 
 }
 
-void printEvent(sensors_event_t* event) {
-  Serial.println();
-  Serial.print("Event ");
-  Serial.print(event->type);
-  double x = -1000000, y = -1000000 , z = -1000000; //dumb values, easy to spot problem
-  if (event->type == SENSOR_TYPE_ACCELEROMETER) {
-    x = event->acceleration.x;
-    y = event->acceleration.y;
-    z = event->acceleration.z;
-  }
-  else if (event->type == SENSOR_TYPE_ORIENTATION) {
-    x = event->orientation.x;
-    y = event->orientation.y;
-    z = event->orientation.z;
-  }
-  else if (event->type == SENSOR_TYPE_MAGNETIC_FIELD) {
-    x = event->magnetic.x;
-    y = event->magnetic.y;
-    z = event->magnetic.z;
-  }
-  else if ((event->type == SENSOR_TYPE_GYROSCOPE) || (event->type == SENSOR_TYPE_ROTATION_VECTOR)) {
-    x = event->gyro.x;
-    y = event->gyro.y;
-    z = event->gyro.z;
-  }
-
-  Serial.print(": x= ");
-  Serial.print(x);
-  Serial.print(" | y= ");
-  Serial.print(y);
-  Serial.print(" | z= ");
-  Serial.println(z);
-}
-
-/**************************************************************************/
-/*
-    Display the raw calibration offset and radius data
-    */
-/**************************************************************************/
-void displaySensorOffsets(const adafruit_bno055_offsets_t &calibData)
-{
-    Serial.print("Accelerometer: ");
-    Serial.print(calibData.accel_offset_x); Serial.print(" ");
-    Serial.print(calibData.accel_offset_y); Serial.print(" ");
-    Serial.print(calibData.accel_offset_z); Serial.print(" ");
-
-    Serial.print("\nGyro: ");
-    Serial.print(calibData.gyro_offset_x); Serial.print(" ");
-    Serial.print(calibData.gyro_offset_y); Serial.print(" ");
-    Serial.print(calibData.gyro_offset_z); Serial.print(" ");
-
-    Serial.print("\nMag: ");
-    Serial.print(calibData.mag_offset_x); Serial.print(" ");
-    Serial.print(calibData.mag_offset_y); Serial.print(" ");
-    Serial.print(calibData.mag_offset_z); Serial.print(" ");
-
-    Serial.print("\nAccel Radius: ");
-    Serial.print(calibData.accel_radius);
-
-    Serial.print("\nMag Radius: ");
-    Serial.print(calibData.mag_radius);
-}
 
 
-void clearCalib()
-{
-  // Preserve all the other persistent parameters
-  persistentData.sensor_id = 0L;
-  persistentData.commit();
-  Serial.println("Stored calibration invalidated.");
-  resetSystem();
-}
