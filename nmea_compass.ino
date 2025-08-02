@@ -343,7 +343,7 @@ DeviceInformationService::DeviceInformationService(BLEServer *server)
   _manufNameCharacteristic->setValue("dougbraun.com");
 
   _modelNumberCharacteristic = _service->createCharacteristic("2a24", BLECharacteristic::PROPERTY_READ);
-  _modelNumberCharacteristic->setValue("NMEA Compass 1.0");
+  _modelNumberCharacteristic->setValue("NMEA Compass 2.0");
 
   _firmwareRevCharacteristic = _service->createCharacteristic("2a26", BLECharacteristic::PROPERTY_READ);
   _firmwareRevCharacteristic->setValue(__DATE__);
@@ -598,7 +598,7 @@ void setup() {
                                   1,                   // Manufacturer's product code
                                  "Doug Compass",       // Manufacturer's Model ID
                                  __DATE__,             // Manufacturer's Software version code
-                                 "1.0",                // Manufacturer's Model version
+                                 "2.0",                // Manufacturer's Model version
                                  1                     // Load Equivalency  (units of 50mA)
                                  );
 
