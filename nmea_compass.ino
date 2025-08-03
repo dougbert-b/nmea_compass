@@ -44,9 +44,9 @@ constexpr bool verbose_bno = false;
 
 
 
-double DEG_2_RAD = 0.01745329251; //BNO055 outputs radians, and NMEA2000 takes radians.
-
-
+//BNO085 outputs radians and NMEA2000 takes radians, but messages and BLE ought to use degrees
+constexpr double RAD_2_DEG = 180.0 / PI;
+constexpr double DEG_2_RAD = 1 / RAD_2_DEG; 
 
 BNO08x myIMU;
 // For the most reliable interaction with the SHTP bus, we need
@@ -536,22 +536,22 @@ void configSensor(void) {
 
 void setup() {
 
+  delay(100); // Allow BNO085 to startup
 
   Serial.begin(115200);
   
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
 
-
-
   // This will use the default I2C Wire pins.
   Wire.begin();
+  //Wire.setClockStretchLimit(4000);
 
   if (myIMU.begin(BNO08X_ADDR, Wire, BNO08X_INT, BNO08X_RST) == false) {
-    Serial.println("BNO08x not detected at specified I2C address. Freezing...");
-    while (1)
-      ;
-
+    Serial.println("BNO08x not detected. Retrying...");
+    delay(100);
+    Wire.begin();
+    myIMU.begin(BNO08X_ADDR, Wire, BNO08X_INT, BNO08X_RST);
   }
   Serial.println("BNO08x found!");
 
@@ -729,10 +729,10 @@ void loop() {
   // Has a new event come in on the Sensor Hub Bus?
   // This will almost always be true - probably several events have come in.
   if (haveEvent) {
-    float rawRoll = (myIMU.getRoll()) * 180.0 / PI; // Convert roll to degrees
-    float rawPitch = -(myIMU.getPitch()) * 180.0 / PI; // Convert pitch to degrees, and negate
-    float rawYaw = (myIMU.getYaw()) * 180.0 / PI; // Convert yaw / heading to degrees
-
+    // These are in radians
+    float roll = myIMU.getRoll();   // Positive roll is to the right, around the device X axis
+    float pitch = -myIMU.getPitch(); // Pitch is around the device Y axis. Negate so that positive pitch is upwards
+    float yaw = myIMU.getYaw();  // Zero yaw is (magnetic) east, positive yaw is to the left!
     uint8_t accuracy = myIMU.getMagAccuracy();
     
     // is it the correct sensor data we want?
@@ -744,46 +744,52 @@ void loop() {
     if (curTime > nextUpdate) {
       nextUpdate = curTime + 500;
     
-      float rawHeading = -rawYaw + 90.0;
-      if (rawHeading < 0.0) {
-        rawHeading += 360.0;
+      // Map yaw to a proper nonnegative compass heading.
+      float heading = -yaw + (PI/2);
+      if (heading < 0.0) {
+        heading += 2*PI;
       }
-    
+
+      // Get values in degrees for messages
+      float degRoll = RadToDeg(roll);
+      float degPitch = RadToDeg(pitch);
+      float degYaw = RadToDeg(yaw);
+      float degHeading = RadToDeg(heading);
+
       pCalibChar->setVal(accuracy, haveConnection);
           
       
       if (verbose) {
-        Serial.print("Heading: ");
-        Serial.print(rawHeading);
-        Serial.print("  Roll (-y): ");
-        Serial.print(rawRoll);
-        Serial.print("  Pitch (-z): ");
-        Serial.print(rawPitch);
+        Serial.print("Yaw: ");
+        Serial.print(degYaw);
+        Serial.print("  Heading: ");
+        Serial.print(degHeading);
+        Serial.print("  Roll: ");
+        Serial.print(degRoll);
+        Serial.print("  Pitch: ");
+        Serial.print(degPitch);
         Serial.print("  Calibration accuracy: ");
         Serial.println(accuracy);
       }
 
-      double radHeading;
       if (accuracy > 1) {
         digitalWrite(LED_BUILTIN, HIGH);  // Indicate NMEA data transmission
-        // The NMEA0183 API wants heading in radians
-        radHeading = DegToRad(rawHeading);
       } else {
-        radHeading = NMEA0183DoubleNA;  // Send a blank value  (N2KDoubleNA is the same value)
+        heading = NMEA0183DoubleNA;  // Send a blank value  (N2KDoubleNA is the same value)
       }
 
       tNMEA0183Msg NMEA0183Msg;
-      if ( NMEA0183SetHDM(NMEA0183Msg, radHeading, "HC") ) {  // HC means magnetic compass
+      if ( NMEA0183SetHDM(NMEA0183Msg, heading, "HC") ) {  // HC means magnetic compass
         NMEA0183->SendMessage(NMEA0183Msg);
       }
 
       tN2kMsg N2kMsg;
-      SetN2kMagneticHeading(N2kMsg, 0, radHeading);
+      SetN2kMagneticHeading(N2kMsg, 0, heading);
       //Serial.println("sending CAN");
       NMEA2000.SendMsg(N2kMsg);
 
       // We send the actual roll/patch values even if the sensor is not calibrated.
-      SetN2kAttitude(N2kMsg, 0, 0.0, DegToRad(rawPitch + persistentData.pitch_offset), DegToRad(rawRoll + persistentData.roll_offset));
+      SetN2kAttitude(N2kMsg, 0, 0.0, pitch + DegToRad(persistentData.pitch_offset), roll + DegToRad(persistentData.roll_offset));
       NMEA2000.SendMsg(N2kMsg);
 
       double rawTemperature = 0.0;   // Available from BNO085?
@@ -791,17 +797,16 @@ void loop() {
       NMEA2000.SendMsg(N2kMsg);
 
       // Check if SourceAddress has changed (due to address conflict on bus)
-
       if (NMEA2000.ReadResetAddressChanged()) {
         // Save potentially changed Source Address to NVS memory
         persistentData.node_address = NMEA2000.GetN2kSource();
         persistentData.commit();
       }
 
-      // These BLE Characteristics are raw uncorrected sensor values
-      pHeadingChar->setVal(rawHeading, haveConnection);
-      pRollChar->setVal(rawRoll, haveConnection);
-      pPitchChar->setVal(rawPitch, haveConnection);
+      // Unlike the NMEA values, these BLE Characteristics are un-offset sensor values
+      pHeadingChar->setVal(degHeading, haveConnection);
+      pRollChar->setVal(degRoll, haveConnection);
+      pPitchChar->setVal(degPitch, haveConnection);
 
       pTemperatureChar->setVal(rawTemperature, haveConnection);
 
