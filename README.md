@@ -5,3 +5,5 @@ includes a SN65VHD230 CAN Bus transceiver board and a 12-to-5 volt voltage regul
 Data can be read and various settings can be configured via BLE.
 I use a simple BLE scanner app on my Android phone to access that data.
 
+4/6/2026: Support has been added for BLE OTA firmware updates.
+

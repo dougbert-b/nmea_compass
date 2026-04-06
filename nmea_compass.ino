@@ -34,10 +34,34 @@
     updates by chegewara
 */
 
-#include <BLEDevice.h>
-#include <BLEUtils.h>
+//#include <BLEDevice.h>
+//#include <BLEUtils.h>
 #include <BLEServer.h>
 
+
+/*
+  Add a BLE OTA service that implement https://components.espressif.com/components/espressif/ble_ota without security
+  The service advertises itself as: 00008018-0000-1000-8000-00805f9b34fb
+  If any of this is defined:
+  MODEL
+  SERIAL_NUM 
+  FW_VERSION  
+  HW_VERSION 
+  MANUFACTURER 
+  the DIS service is added
+
+  The flow of creating the BLE server is:
+  1. Create a BLE Server
+  2. Add a BLE OTA Service
+  3. Add a DIS Service
+  4. Start the service.
+  5. Start advertising.
+  6. Process the update
+*/
+
+#include "BLEOTA.h"
+
+BLEOTAClass BLEOTA;
 
 constexpr bool verbose = true;
 constexpr bool verbose_bno = false;
@@ -115,17 +139,18 @@ PersistentData persistentData;
 
 
 
-// Older versions of the BLE library would automatically resume advertising when the
-// client disconnected, but now we have to do that ourselves via this callback.
 class MyBLEServerCallbacks : public BLEServerCallbacks {
 public:
-  void onDisconnect(BLEServer *pServer) override;
+
+  void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) override {
+    //  Seen in BLEOTA examples  pServer->updateConnParams(param->connect.remote_bda, 0x06, 0x12, 0, 2000);
+  };
+
+  void onDisconnect(BLEServer *pServer) override {
+    //pServer->startAdvertising();  // Handled in loop()
+  };
 };
 
-void MyBLEServerCallbacks::onDisconnect(BLEServer *pServer)
-{
-  pServer->startAdvertising();
-}
 
 
 
@@ -297,62 +322,6 @@ void MyActionCharacteristic::onWrite(BLECharacteristic *characteristic)
 }
 
 
-/* *****************************************************************
-    <!-- 180A: org.bluetooth.service.device_information -->
-    <service uuid="180A" id="device_information">
-        <description>Device Information</description>
-
-        <!-- 2A29: org.bluetooth.characteristic.manufacturer_name_string -->
-        <!-- (support for this characteristic is MANDATORY 
-              according to the profile spec) -->
-        <characteristic uuid="2A29" id="c_manufacturer_name">
-            <description>Manufacturer Name</description>
-            <properties read="true" const="true" />
-            <value>My SuperDuper Company</value>
-        </characteristic>
-
-        <!-- 2A24: org.bluetooth.characteristic.model_number_string -->
-        <characteristic uuid="2A24" id="c_model_number">
-            <description>Model Number</description>
-            <properties read="true" const="true" />
-            <value>TESTTHERMO-0001</value>
-        </characteristic>
-
-    </service>
-
-    ************************************************************************ */
-
-
-class DeviceInformationService
-{
-public:
-  DeviceInformationService() = delete;
-  DeviceInformationService(BLEServer *server);
-private:
-  BLEService *_service;
-  BLECharacteristic *_manufNameCharacteristic;
-  BLECharacteristic *_modelNumberCharacteristic;
-  BLECharacteristic *_firmwareRevCharacteristic;
-};
-
-DeviceInformationService::DeviceInformationService(BLEServer *server)
-{
-  _service = server->createService(BLEUUID("180a"), 32 /*numHandles*/);
-
-  _manufNameCharacteristic = _service->createCharacteristic("2a29", BLECharacteristic::PROPERTY_READ);
-  _manufNameCharacteristic->setValue("dougbraun.com");
-
-  _modelNumberCharacteristic = _service->createCharacteristic("2a24", BLECharacteristic::PROPERTY_READ);
-  _modelNumberCharacteristic->setValue("NMEA Compass 2.0");
-
-  _firmwareRevCharacteristic = _service->createCharacteristic("2a26", BLECharacteristic::PROPERTY_READ);
-  _firmwareRevCharacteristic->setValue(__DATE__);
-
-  _service->dump();
-
-  _service->start();
-  
-}
 
 
 
@@ -381,7 +350,6 @@ const char *RESET_UUID =         "cd3fb5aa-c679-4d3e-9eb4-23587c136d2a";
 
 BLEServer *pServer(nullptr);
 BLEService *pService(nullptr);
-DeviceInformationService *pDeviceInfoService(nullptr);
 
 MyAngleCharacteristic *pHeadingChar(nullptr);
 MyAngleCharacteristic *pRollChar(nullptr);
@@ -598,7 +566,7 @@ void setup() {
                                   1,                   // Manufacturer's product code
                                  "Doug Compass",       // Manufacturer's Model ID
                                  __DATE__,             // Manufacturer's Software version code
-                                 "2.0",                // Manufacturer's Model version
+                                 "2.1",                // Manufacturer's Model version
                                  1                     // Load Equivalency  (units of 50mA)
                                  );
 
@@ -626,13 +594,22 @@ void setup() {
 
   BLEDevice::init("DougCompass");
   pServer = BLEDevice::createServer();
-  // Not needed at the moment  pServer->setCallbacks(&serverCallbacks);
+  pServer->setCallbacks(&serverCallbacks);
   
-  pDeviceInfoService = new DeviceInformationService(pServer);
+  
+  // Add OTA and Device Information Service
+  BLEOTA.begin(pServer);
+
+  BLEOTA.setModel("NMEA Compass 2.0");
+  BLEOTA.setSerialNumber("1");
+  BLEOTA.setFWVersion(__DATE__);
+  BLEOTA.setHWVersion("2");
+  BLEOTA.setManufactuer("dougbraun.com");
+
+  BLEOTA.init();
+
 
   pService = pServer->createService(BLEUUID(SERVICE_UUID), 48 /*numHandles*/);
-
-  
  
   Serial.println("resolution done!");
 
@@ -673,9 +650,11 @@ void setup() {
   pService->dump();
 
   pService->start();
+
   
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->addServiceUUID(BLEOTA.getBLEOTAuuid());
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
   pAdvertising->setMinPreferred(0x12);
@@ -717,6 +696,9 @@ void loop() {
       pServer->startAdvertising();
     }
   }
+  
+  BLEOTA.process();
+
 
   if (myIMU.wasReset()) {
     Serial.print("sensor was reset ");
