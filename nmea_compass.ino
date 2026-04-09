@@ -42,9 +42,7 @@ const char *SERIAL_NUM = "001";                // Manufacturer's Model serial co
 const char *FIRMWARE_VERSION = __DATE__;
                                   
 
-//#include <BLEDevice.h>
-//#include <BLEUtils.h>
-#include <BLEServer.h>
+#include <BLEDevice.h>
 
 
 /*
