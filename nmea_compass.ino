@@ -34,6 +34,14 @@
     updates by chegewara
 */
 
+// Used by both NMEA2000 and BLE
+const char *MANUFACTURER = "dougbraun.com";
+const char *MODEL_NAME = "Doug Compass";
+const char *MODEL_VERSION = "2.1";
+const char *SERIAL_NUM = "001";                // Manufacturer's Model serial code
+const char *FIRMWARE_VERSION = __DATE__;
+                                  
+
 //#include <BLEDevice.h>
 //#include <BLEUtils.h>
 #include <BLEServer.h>
@@ -562,16 +570,16 @@ void setup() {
   for (int i = 0; i < 6; i++) id += (chipid[i] << (7 * i));
 
   // Set product information
-  NMEA2000.SetProductInformation("001",                // Manufacturer's Model serial code
-                                  1,                   // Manufacturer's product code
-                                 "Doug Compass",       // Manufacturer's Model ID
-                                 __DATE__,             // Manufacturer's Software version code
-                                 "2.1",                // Manufacturer's Model version
+  NMEA2000.SetProductInformation(SERIAL_NUM,                // Manufacturer's Model serial code
+                                 1,                   // Manufacturer's product code  (made up)
+                                 MODEL_NAME,       // Manufacturer's Model ID
+                                 FIRMWARE_VERSION,             // Manufacturer's Software version code
+                                 MODEL_VERSION,                // Manufacturer's Model version
                                  1                     // Load Equivalency  (units of 50mA)
                                  );
 
    // Set device information
-  NMEA2000.SetDeviceInformation(id,   // Unique number. Use e.g. Serial number.
+  NMEA2000.SetDeviceInformation(id,   // Unique number. Based on ESP32 MAC address.
                                 140,  // Device function=Ownship Attitude. See codes on http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
                                 60,   // Device class=Navigation. See codes on  http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
                                 2006  // Just choosen free from code list on http://www.nmea.org/Assets/20121020%20nmea%202000%20registration%20list.pdf
@@ -600,11 +608,11 @@ void setup() {
   // Add OTA and Device Information Service
   BLEOTA.begin(pServer);
 
-  BLEOTA.setModel("NMEA Compass 2.0");
-  BLEOTA.setSerialNumber("1");
-  BLEOTA.setFWVersion(__DATE__);
-  BLEOTA.setHWVersion("2");
-  BLEOTA.setManufactuer("dougbraun.com");
+  BLEOTA.setModel(MODEL_NAME);
+  BLEOTA.setSerialNumber(SERIAL_NUM);
+  BLEOTA.setFWVersion(FIRMWARE_VERSION);
+  BLEOTA.setHWVersion(MODEL_VERSION);
+  BLEOTA.setManufactuer(MANUFACTURER);
 
   BLEOTA.init();
 
