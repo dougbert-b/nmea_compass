@@ -67,8 +67,6 @@ const char *FIRMWARE_VERSION = __DATE__;
 
 #include "BLEOTA.h"
 
-BLEOTAClass BLEOTA;
-
 constexpr bool verbose = true;
 constexpr bool verbose_bno = false;
 
