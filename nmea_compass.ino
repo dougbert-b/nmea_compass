@@ -101,7 +101,7 @@ public:
   int node_address;  // For NMEA2K, default is 34
   float roll_offset;
   float pitch_offset;
-  float temperature_offset;
+  float dummy1;  // No longer used
 
   void begin() {
     prefs.begin("compass_prefs");  
@@ -129,7 +129,7 @@ public:
 
     roll_offset = 0.0;
     pitch_offset = 0.0;
-    temperature_offset = 0.0;
+    dummy1 = 0.0;
   }
 
 
@@ -337,7 +337,6 @@ const char *SERVICE_UUID  =      "4bd81659-41d3-46d2-9e84-bd7e9cae18ef";
 const char *HEADING_UUID  =      "cd3fb5aa-c679-4d3e-9eb4-97912c27b298";
 const char *ROLL_UUID  =         "cd3fb5aa-c679-4d3e-9eb4-3990fa52213b";
 const char *PITCH_UUID  =        "cd3fb5aa-c679-4d3e-9eb4-f765e94d054b";
-const char *TEMPERATURE_UUID  =  "cd3fb5aa-c679-4d3e-9eb4-bbe77c760f16";
 
 const char *CALIBRATION_UUID =   "cd3fb5aa-c679-4d3e-9eb4-8ce31b0538c6";
 
@@ -345,7 +344,6 @@ const char *REORIENTATION_UUID = "cd3fb5aa-c679-4d3e-9eb4-85b6bfc15120";
 
 const char *ROLL_OFFSET_UUID =   "cd3fb5aa-c679-4d3e-9eb4-a0b507178d86";
 const char *PITCH_OFFSET_UUID =  "cd3fb5aa-c679-4d3e-9eb4-361609541a10";
-const char *TEMPERATURE_OFFSET_UUID =  "cd3fb5aa-c679-4d3e-9eb4-929b992324e2";
 
 const char *SAVE_CALIB_UUID =   "cd3fb5aa-c679-4d3e-9eb4-4181053fa198";
 const char *CLEAR_CALIB_UUID =   "cd3fb5aa-c679-4d3e-9eb4-c12dcc1b4ccb";
@@ -358,12 +356,10 @@ BLEService *pService(nullptr);
 MyAngleCharacteristic *pHeadingChar(nullptr);
 MyAngleCharacteristic *pRollChar(nullptr);
 MyAngleCharacteristic *pPitchChar(nullptr);
-MyAngleCharacteristic *pTemperatureChar(nullptr);
 MyAngleCharacteristic *pCalibChar(nullptr);
 
 MyFloatDataCharacteristic *pRollOffsetChar(nullptr);
 MyFloatDataCharacteristic *pPitchOffsetChar(nullptr);
-MyFloatDataCharacteristic *pTemperatureOffsetChar(nullptr);
 
 MyByteDataCharacteristic *pReorientationChar(nullptr);
 
@@ -620,7 +616,6 @@ void setup() {
   pHeadingChar = new MyAngleCharacteristic(pService, HEADING_UUID, "heading value");
   pRollChar = new MyAngleCharacteristic(pService, ROLL_UUID, "roll value");
   pPitchChar = new MyAngleCharacteristic(pService, PITCH_UUID, "pitch value");
-  pTemperatureChar = new MyAngleCharacteristic(pService, TEMPERATURE_UUID, "temperature value");
 
   pCalibChar = new MyAngleCharacteristic(pService, CALIBRATION_UUID, "calibration accuracy");
 
@@ -643,11 +638,6 @@ void setup() {
   pPitchOffsetChar = new MyFloatDataCharacteristic(pService, PITCH_OFFSET_UUID, "pitch offset", 
                              []{ return persistentData.pitch_offset; },
                              [](float val){ persistentData.pitch_offset = val; persistentData.commit();}
-                          );
-
-  pTemperatureOffsetChar = new MyFloatDataCharacteristic(pService, TEMPERATURE_OFFSET_UUID, "temperature offset", 
-                             []{ return persistentData.temperature_offset; },
-                             [](float val){ persistentData.temperature_offset = val; persistentData.commit();}
                           );
 
   
@@ -778,10 +768,6 @@ void loop() {
       SetN2kAttitude(N2kMsg, 0, 0.0, pitch + DegToRad(persistentData.pitch_offset), roll + DegToRad(persistentData.roll_offset));
       NMEA2000.SendMsg(N2kMsg);
 
-      double rawTemperature = 0.0;   // Available from BNO085?
-      SetN2kTemperatureExt(N2kMsg, 0, 1 /*TempInstance*/, N2kts_InsideTemperature, CToKelvin(rawTemperature + persistentData.temperature_offset));
-      NMEA2000.SendMsg(N2kMsg);
-
       // Check if SourceAddress has changed (due to address conflict on bus)
       if (NMEA2000.ReadResetAddressChanged()) {
         // Save potentially changed Source Address to NVS memory
@@ -793,10 +779,7 @@ void loop() {
       pHeadingChar->setVal(degHeading, haveConnection);
       pRollChar->setVal(degRoll, haveConnection);
       pPitchChar->setVal(degPitch, haveConnection);
-
-      pTemperatureChar->setVal(rawTemperature, haveConnection);
-
-          
+       
       delay(5); //allow LED to blink and the cpu to switch to other tasks
       digitalWrite(LED_BUILTIN, LOW);
 
