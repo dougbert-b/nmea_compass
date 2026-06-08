@@ -648,7 +648,8 @@ void setup() {
   
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->addServiceUUID(BLEOTA.getBLEOTAuuid());
+  // Ensure that the OTA service UUID is represented with 16 bits, so it fits in the advertising frame.
+  pAdvertising->addServiceUUID(BLEUUID(BLEOTA.getBLEOTAuuid()).to16());  
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
   pAdvertising->setMinPreferred(0x12);
